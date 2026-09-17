@@ -30,6 +30,7 @@ class LiveState:
 
     # Eye
     ear:             float                  = 0.30
+    ear_baseline:    float                  = 0.28
     blink_rate:      float                  = 0.0
     fatigue_label:   str                    = "Normal"
     fatigue_strain:  float                  = 0.0
@@ -57,6 +58,7 @@ class LiveState:
                 "face_quality":    self.face_quality,
                 "face_error":      self.face_error,
                 "ear":             self.ear,
+                "ear_baseline":    self.ear_baseline,
                 "blink_rate":      self.blink_rate,
                 "fatigue_label":   self.fatigue_label,
                 "fatigue_strain":  self.fatigue_strain,

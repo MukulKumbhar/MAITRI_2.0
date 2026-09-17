@@ -160,48 +160,80 @@ def get_alert(
     stress_pct: float,
     dominant_emotion: str,
     fatigue_label: str = "Normal",
+    vitals_status: str = "Normal",
+    hypoxia_risk: str = "Nominal",
 ) -> AlertResult:
     """
     Return the appropriate alert + support message.
-    Emotion-specific overrides take priority whenever distress emotions are detected or stress is elevated.
-    Fatigue guidance activates when eye drowsiness is detected.
+    Hypoxia alerts and clinical distress take priority.
+    Physical workload is recognized to prevent false panic alarms.
     """
     level = classify_stress(stress_pct)
     emotion_key = dominant_emotion.lower()
 
-    # Distress emotions: fear, anger, sadness
-    is_distress_emotion = emotion_key in ("fear", "angry", "sad")
-
-    # Apply emotion override if:
-    # 1. Stress is MILD, ELEVATED, or CRITICAL and emotion has a specific countermeasure
-    # 2. Dominant emotion is an acute distress emotion (even before vitals catch up)
-    if (level in ("MILD", "ELEVATED", "CRITICAL") or is_distress_emotion) and emotion_key in EMOTION_OVERRIDES:
-        override = EMOTION_OVERRIDES[emotion_key]
-        # Promote effective level to at least MILD if displaying distress
-        if level == "NOMINAL" and is_distress_emotion:
-            level = "MILD"
+    # Priority 1: Acute Hypoxia Hazard
+    if hypoxia_risk == "Severe Hypoxia":
+        level = "CRITICAL"
         msg = {
-            "header":    override["header"],
-            "body":      override["body"],
-            "technique": override["technique"],
-        }
-    elif fatigue_label == "Drowsy" and level in ("NOMINAL", "MILD", "ELEVATED"):
-        level = "ELEVATED" if level == "ELEVATED" else "MILD"
-        msg = {
-            "header": "Fatigue Alert — Drowsiness Detected",
+            "header": "🚨 Hypoxia Alert — Critical SpO₂ Drop (<90%)",
             "body": (
-                "Sustained low Eye Aspect Ratio (EAR) indicates significant eyelid closure "
-                "and micro-sleep hazard. Immediate rest recommended."
+                "Severe arterial oxygen desaturation detected. Immediate cognitive impairment "
+                "and blackout hazard. Verify cabin or spacesuit life support systems immediately."
             ),
             "technique": (
-                "**20-20-20 Eye Rest & Micro-Nap Protocol:**\n"
-                "1. Look away from display screens at an object 20 feet away for 20 seconds.\n"
-                "2. Blink deliberately 10 times.\n"
-                "3. If operational schedule permits, initiate a 15-minute cabin rest cycle."
+                "**Emergency Hypoxia Protocol:**\n"
+                "1. Switch to 100% emergency pure oxygen supply.\n"
+                "2. Verify positive pressure helmet/mask seal.\n"
+                "3. Halt mission operations and notify crew."
             ),
         }
+    # Priority 2: Physical Workload / Exercise Recognition
+    elif vitals_status in ("Elevated", "Critical") and emotion_key in ("neutral", "happy") and fatigue_label != "Stressed Eyes" and stress_pct < 50.0:
+        level = "NOMINAL"
+        msg = {
+            "header": "💪 Cardiovascular Workload — Physical Exertion",
+            "body": (
+                "Elevated metabolic rate with calm psychological affect detected. "
+                "Consistent with physical countermeasure exercise (T2 treadmill / ARED) or EVA."
+            ),
+            "technique": (
+                "**Hydration & Thermal Regulation Protocol:**\n"
+                "1. Ingest 250 mL electrolyte fluids.\n"
+                "2. Monitor core temperature and verify LCVG suit coolant flow.\n"
+                "3. Maintain target heart rate training zone."
+            ),
+        }
+    # Priority 3: Emotion-specific Overrides
     else:
-        msg = SUPPORT_MESSAGES[level]
+        # Distress emotions: fear, anger, sadness
+        is_distress_emotion = emotion_key in ("fear", "angry", "sad")
+
+        if (level in ("MILD", "ELEVATED", "CRITICAL") or is_distress_emotion) and emotion_key in EMOTION_OVERRIDES:
+            override = EMOTION_OVERRIDES[emotion_key]
+            if level == "NOMINAL" and is_distress_emotion:
+                level = "MILD"
+            msg = {
+                "header":    override["header"],
+                "body":      override["body"],
+                "technique": override["technique"],
+            }
+        elif fatigue_label == "Drowsy" and level in ("NOMINAL", "MILD", "ELEVATED"):
+            level = "ELEVATED" if level == "ELEVATED" else "MILD"
+            msg = {
+                "header": "Fatigue Alert — Drowsiness Detected",
+                "body": (
+                    "Sustained low Eye Aspect Ratio (EAR) indicates significant eyelid closure "
+                    "and micro-sleep hazard. Immediate rest recommended."
+                ),
+                "technique": (
+                    "**20-20-20 Eye Rest & Micro-Nap Protocol:**\n"
+                    "1. Look away from display screens at an object 20 feet away for 20 seconds.\n"
+                    "2. Blink deliberately 10 times.\n"
+                    "3. If operational schedule permits, initiate a 15-minute cabin rest cycle."
+                ),
+            }
+        else:
+            msg = SUPPORT_MESSAGES[level]
 
     return AlertResult(
         stress_level=level,

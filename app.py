@@ -151,6 +151,7 @@ class MAITRIVideoProcessor:
             eye = analyze_eyes(bgr, self.eye_state)
             with ls.lock:
                 ls.ear            = eye.ear
+                ls.ear_baseline   = eye.ear_baseline
                 ls.blink_rate     = eye.blink_rate
                 ls.fatigue_label  = eye.fatigue_label
                 ls.fatigue_strain = eye.fatigue_strain
@@ -238,9 +239,10 @@ def _render_dip_status(is_playing: bool):
 def _render_eye_panel(is_playing: bool):
     ls_snap = st.session_state.live_state.snapshot()
     if is_playing:
-        e1, e2 = st.columns(2)
+        e1, e2, e3 = st.columns(3)
         e1.metric("EAR", f"{ls_snap['ear']:.3f}")
-        e2.metric("Blink Rate", f"{ls_snap['blink_rate']:.1f} /min")
+        e2.metric("Baseline", f"{ls_snap.get('ear_baseline', 0.28):.3f}")
+        e3.metric("Blink Rate", f"{ls_snap['blink_rate']:.1f} /min")
         eye_color = {
             "Normal": "#2ecc71", "Drowsy": "#e74c3c",
             "Stressed Eyes": "#e67e22", "Hyperfocused": "#f1c40f",
@@ -261,6 +263,8 @@ def _render_live_assessment(
     skin_temp: float,
     spo2: float,
     vitals_strain: float,
+    vitals_status: str,
+    hypoxia_risk: str,
     is_playing: bool,
 ):
     ls_snap = st.session_state.live_state.snapshot()
@@ -314,7 +318,13 @@ def _render_live_assessment(
             )
 
     with gauge_col:
-        alert = get_alert(fusion.stress_pct, fusion.dominant_emotion, ls_snap.get("fatigue_label", "Normal"))
+        alert = get_alert(
+            fusion.stress_pct,
+            fusion.dominant_emotion,
+            ls_snap.get("fatigue_label", "Normal"),
+            vitals_status=vitals_status,
+            hypoxia_risk=hypoxia_risk,
+        )
         st.markdown("**Stress Level**")
         st.markdown(
             f"<div style='text-align:center;padding:12px;border-radius:12px;"
@@ -453,17 +463,19 @@ with tab_live:
 
         vitals = compute_vitals_strain(heart_rate, skin_temp, float(spo2))
 
-        v1, v2, v3 = st.columns(3)
+        v1, v2, v3, v4 = st.columns(4)
         v1.metric("HR Strain",   f"{vitals.hr_strain*100:.0f}%")
         v2.metric("Temp Strain", f"{vitals.temp_strain*100:.0f}%")
         v3.metric("SpO₂ Strain", f"{vitals.spo2_strain*100:.0f}%")
+        v4.metric("Moran PSI",   f"{vitals.psi_score} / 10")
 
         vitals_color = {"Normal": "#2ecc71", "Elevated": "#e67e22", "Critical": "#e74c3c"}.get(
             vitals.status, "#aaa"
         )
+        hypoxia_badge = f" &nbsp;|&nbsp; 🫁 <b style='color:#e74c3c;'>{vitals.hypoxia_risk}</b>" if vitals.hypoxia_risk != "Nominal" else ""
         st.markdown(
             f"<span class='stress-badge' style='background:{vitals_color};'>"
-            f"Vitals: {vitals.status}</span>",
+            f"Vitals: {vitals.status} ({vitals.psi_category})</span>{hypoxia_badge}",
             unsafe_allow_html=True,
         )
 
@@ -479,6 +491,8 @@ with tab_live:
         skin_temp=skin_temp,
         spo2=spo2,
         vitals_strain=vitals.vitals_strain,
+        vitals_status=vitals.status,
+        hypoxia_risk=vitals.hypoxia_risk,
         is_playing=ctx.state.playing,
     )
 

@@ -198,15 +198,37 @@ def fuse(
         + w_e * fatigue_strain
     )
 
-    # Acute single-modality override:
-    # Extreme stressors (severe hypoxia/tachycardia, acute panic/fear, or severe drowsiness)
-    # elevate the stress index even if another modality is currently passive/neutral.
-    stress_raw = max(
-        composite_stress,
-        0.80 * vitals_strain,
-        0.75 * neg_score,
-        0.70 * fatigue_strain if fatigue_strain >= 0.70 else 0.0,
+    # ── Context-Aware Clinical Cross-Validation Rules ─────────────────────
+    # Case A: Physical Exertion (Cardiovascular workload with calm facial affect)
+    is_physical_exertion = (
+        vitals_strain >= 0.35
+        and neg_score < 0.18
+        and fatigue_strain < 0.45
     )
+
+    # Case B: Compound Sympathetic Hyper-Arousal (Multi-system alarm: vitals + face + eyes)
+    is_compound_panic = (
+        vitals_strain >= 0.35
+        and neg_score >= 0.30
+        and fatigue_strain >= 0.40
+    )
+
+    if is_physical_exertion:
+        # Prevent physical workload/exercise from triggering false psychological panic
+        stress_raw = 0.35 * vitals_strain + 0.65 * neg_score
+        stress_raw = min(0.48, stress_raw)   # Cap at mild workload band
+    elif is_compound_panic:
+        # Multi-modal confirmation amplifies confidence of acute distress
+        stress_raw = min(1.0, max(composite_stress, 0.75 * neg_score, 0.75 * vitals_strain) * 1.20)
+    else:
+        # Standard baseline single-modality acute overrides
+        stress_raw = max(
+            composite_stress,
+            0.80 * vitals_strain,
+            0.75 * neg_score,
+            0.70 * fatigue_strain if fatigue_strain >= 0.70 else 0.0,
+        )
+
     stress_pct = round(_clamp(stress_raw) * 100, 2)
 
     dominant = max(state.ema_probs, key=state.ema_probs.get)

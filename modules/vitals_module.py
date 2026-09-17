@@ -17,6 +17,9 @@ class VitalsResult:
     spo2_strain:   float   # 0–1
     vitals_strain: float   # 0–1  (weighted composite)
     status:        str     # "Normal" / "Elevated" / "Critical"
+    psi_score:     float   = 0.0             # Moran Physiological Strain Index (0–10)
+    psi_category:  str     = "No Strain"     # "No Strain" / "Low" / "Moderate" / "High" / "Critical"
+    hypoxia_risk:  str     = "Nominal"       # "Nominal" / "Mild Hypoxia" / "Severe Hypoxia"
 
 
 def _clamp(val: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -29,7 +32,7 @@ def compute_vitals_strain(
     spo2: float,
 ) -> VitalsResult:
     """
-    Compute composite physiological strain.
+    Compute composite physiological strain and Moran Physiological Strain Index (PSI).
 
     HR normalisation:
         ≤70 BPM → 0  (resting)
@@ -54,12 +57,39 @@ def compute_vitals_strain(
         + 0.30 * temp_strain
         + 0.20 * spo2_strain
     )
+    # Acute hypoxia override: arterial desaturation (<92%) cannot be masked by resting HR
+    if spo2_strain >= 0.45:
+        vitals_strain = max(vitals_strain, 0.85 * spo2_strain)
     vitals_strain = _clamp(vitals_strain)
 
+    # ── Aerospace Moran Physiological Strain Index (PSI: 0–10) ────────────
+    # Validated by NASA and US Army for thermal and cardiovascular strain
+    psi_raw = 5.0 * (temperature - 36.5) / 3.0 + 5.0 * (heart_rate - 60.0) / 120.0
+    psi_score = round(max(0.0, min(10.0, psi_raw)), 1)
+
+    if psi_score >= 8.5:
+        psi_category = "Critical Strain"
+    elif psi_score >= 6.5:
+        psi_category = "High Strain"
+    elif psi_score >= 4.5:
+        psi_category = "Moderate Strain"
+    elif psi_score >= 2.5:
+        psi_category = "Low Strain"
+    else:
+        psi_category = "No Strain"
+
+    # ── Hypoxia Risk ──────────────────────────────────────────────────────
+    if spo2 < 90.0:
+        hypoxia_risk = "Severe Hypoxia"
+    elif spo2 < 94.0:
+        hypoxia_risk = "Mild Hypoxia"
+    else:
+        hypoxia_risk = "Nominal"
+
     # Status label (used in dashboard badge)
-    if vitals_strain >= 0.70:
+    if vitals_strain >= 0.70 or hypoxia_risk == "Severe Hypoxia" or psi_score >= 8.5:
         status = "Critical"
-    elif vitals_strain >= 0.40:
+    elif vitals_strain >= 0.40 or hypoxia_risk == "Mild Hypoxia" or psi_score >= 5.0:
         status = "Elevated"
     else:
         status = "Normal"
@@ -73,5 +103,8 @@ def compute_vitals_strain(
         spo2_strain=spo2_strain,
         vitals_strain=vitals_strain,
         status=status,
+        psi_score=psi_score,
+        psi_category=psi_category,
+        hypoxia_risk=hypoxia_risk,
     )
 

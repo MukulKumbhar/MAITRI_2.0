@@ -51,20 +51,27 @@ _BLINK_WINDOW_SEC = 60.0
 @dataclass
 class EyeSessionState:
     """Persists across Streamlit reruns via st.session_state['eye_state']."""
-    blink_timestamps: List[float] = field(default_factory=list)
-    prev_ear:         float = 0.30
-    in_blink:         bool  = False
+    blink_timestamps:    List[float]     = field(default_factory=list)
+    open_ear_history:    List[float]     = field(default_factory=list)
+    ear_baseline:        float           = 0.28
+    prev_ear:            float           = 0.30
+    in_blink:            bool            = False
+    blink_start_time:    Optional[float] = None
+    last_blink_end_time: float           = 0.0
+    drowsy_start_time:   Optional[float] = None
+    session_start_time:  float           = field(default_factory=time.time)
 
 
 @dataclass
 class EyeResult:
     ear:             float   # current Eye Aspect Ratio (avg both eyes)
-    blink_rate:      float   # blinks/minute over last 60 s
+    blink_rate:      float   # blinks/minute over rolling window
     fatigue_label:   str     # "Normal" / "Drowsy" / "Hyperfocused" / "Stressed Eyes"
     fatigue_strain:  float   # 0–1 (used by fusion module)
     eye_quality:     float   # 1 if data valid, 0 if not
     new_blink:       bool    # True if a new blink was registered this frame
     available:       bool    # False if MediaPipe not working
+    ear_baseline:    float   = 0.28
 
 
 def _ear_from_landmarks(landmarks, indices, img_w: int, img_h: int) -> float:
@@ -168,35 +175,79 @@ def analyze_eyes(
     right_ear = _ear_from_landmarks(lm, _RIGHT_EYE, w, h)
     ear = (left_ear + right_ear) / 2.0
 
-    # ── Blink detection — rising edge ─────────────────────────────────────
+    # ── Blink detection with adaptive baseline & hysteresis ───────────────
     now = time.time()
     new_blink = False
-    if session.prev_ear < _EAR_BLINK_THRESH and ear >= _EAR_BLINK_THRESH:
-        if session.in_blink:
-            session.blink_timestamps.append(now)
-            new_blink = True
-        session.in_blink = False
-    elif ear < _EAR_BLINK_THRESH:
-        session.in_blink = True
+
+    # Collect open-eye EAR samples to establish personalized baseline
+    if ear >= 0.18:
+        session.open_ear_history.append(ear)
+        if len(session.open_ear_history) > 60:
+            session.open_ear_history.pop(0)
+
+    if len(session.open_ear_history) >= 10:
+        sorted_ears = sorted(session.open_ear_history)
+        p80_idx = int(len(sorted_ears) * 0.80)
+        baseline = sorted_ears[min(p80_idx, len(sorted_ears) - 1)]
+        session.ear_baseline = float(np.clip(baseline, 0.23, 0.38))
+
+    close_thresh  = session.ear_baseline * 0.72   # Eyes must drop below this to trigger closure
+    open_thresh   = session.ear_baseline * 0.82   # Eyes must rise above this to complete blink
+    drowsy_thresh = session.ear_baseline * 0.65   # Sustained below this -> Drowsiness
+
+    # ── Dual-Threshold Hysteresis with Duration & Debounce ────────────────
+    if ear < close_thresh:
+        if not session.in_blink:
+            session.in_blink = True
+            session.blink_start_time = now
+
+        # Track prolonged closure for drowsiness detection
+        if session.drowsy_start_time is None:
+            session.drowsy_start_time = now
+    else:
+        # EAR is above close_thresh
+        if ear >= open_thresh:
+            if session.in_blink:
+                blink_duration = now - (session.blink_start_time if session.blink_start_time else now)
+                debounce_passed = (now - session.last_blink_end_time) >= 0.12
+                # Valid biological blink duration: 70ms to 450ms
+                if 0.07 <= blink_duration <= 0.45 and debounce_passed:
+                    session.blink_timestamps.append(now)
+                    new_blink = True
+                    session.last_blink_end_time = now
+
+                session.in_blink = False
+                session.blink_start_time = None
+
+            session.drowsy_start_time = None
+
     session.prev_ear = ear
 
-    # ── Prune old timestamps ──────────────────────────────────────────────
+    # ── Prune old timestamps (rolling 60s window) ─────────────────────────
     cutoff = now - _BLINK_WINDOW_SEC
     session.blink_timestamps = [t for t in session.blink_timestamps if t > cutoff]
 
-    # ── Blink rate (per minute) ───────────────────────────────────────────
-    if len(session.blink_timestamps) >= 2:
-        elapsed = min(now - session.blink_timestamps[0], _BLINK_WINDOW_SEC)
-        blink_rate = len(session.blink_timestamps) / max(elapsed, 1.0) * 60.0
+    # ── Blink rate (per minute) with Warm-up Window ───────────────────────
+    elapsed = min(now - session.session_start_time, _BLINK_WINDOW_SEC)
+    if elapsed < 8.0:
+        # During initial 8s warm-up, report nominal baseline rather than noisy extrapolation
+        blink_rate = 16.0 if len(session.blink_timestamps) > 0 else 0.0
     else:
-        blink_rate = 0.0
+        blink_rate = (len(session.blink_timestamps) / max(elapsed, 1.0)) * 60.0
 
-    # ── Fatigue classification ────────────────────────────────────────────
-    if ear < _EAR_FATIGUE_THRESH:
+    # ── Fatigue & Eye Stress Classification ───────────────────────────────
+    is_drowsy = False
+    if session.drowsy_start_time is not None:
+        if (now - session.drowsy_start_time) >= 0.45:
+            is_drowsy = True
+    elif ear < drowsy_thresh and session.prev_ear < drowsy_thresh:
+        is_drowsy = True
+
+    if is_drowsy:
         label, strain = "Drowsy", 0.80
-    elif blink_rate > _BLINK_HIGH_THRESH:
+    elif blink_rate > 30.0 and elapsed >= 10.0:
         label, strain = "Stressed Eyes", 0.55
-    elif 0 < blink_rate < _BLINK_LOW_THRESH:
+    elif blink_rate < 8.0 and elapsed >= 20.0:
         label, strain = "Hyperfocused", 0.40
     else:
         label, strain = "Normal", 0.10
@@ -209,4 +260,5 @@ def analyze_eyes(
         eye_quality=1.0,
         new_blink=new_blink,
         available=True,
+        ear_baseline=round(session.ear_baseline, 3),
     )
