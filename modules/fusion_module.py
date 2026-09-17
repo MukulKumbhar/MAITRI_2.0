@@ -79,6 +79,7 @@ class FusionState:
     w_eye:          float = _BASE_EYE_W
     last_emotion:   str   = "neutral"
     last_stress:    float = 0.0
+    initialized:    bool  = False   # True after first frame processed (for EMA bootstrap)
 
 
 @dataclass
@@ -171,20 +172,17 @@ def fuse(
     w_e = state.w_eye    / total_w
 
     # ── Weighted fusion ───────────────────────────────────────────────────
-    # If face is detected with acceptable quality, facial expressions directly guide the
-    # emotion distribution, with high vitals strain modulating acute stress signals.
-    if face_probs and face_quality > 0.2:
-        if vitals_strain > 0.40:
-            raw_probs = {
-                e: 0.70 * f_probs[e] + 0.30 * v_probs[e]
-                for e in EMOTIONS
-            }
-        else:
-            raw_probs = dict(f_probs)
-    else:
-        # Camera is off or face is occluded: infer pseudo-emotions from vitals & fatigue
+    # Quality-weighted fusion across all active modalities
+    if face_probs and face_quality > 0.0:
         raw_probs = {
-            e: 0.70 * v_probs[e] + 0.30 * e_probs[e]
+            e: w_f * f_probs[e] + w_v * v_probs[e] + w_e * e_probs[e]
+            for e in EMOTIONS
+        }
+    else:
+        # Camera is off or no face detected: infer from vitals & fatigue
+        total_non_face = w_v + w_e if (w_v + w_e) > 0 else 1.0
+        raw_probs = {
+            e: (w_v / total_non_face) * v_probs[e] + (w_e / total_non_face) * e_probs[e]
             for e in EMOTIONS
         }
 
@@ -193,7 +191,6 @@ def fuse(
     # otherwise use slow alpha for steady-state smoothing (anti-flicker).
     # Ref: Adaptive EMA — smaller α = smoother, larger α = more reactive.
     prev_stress_norm = state.last_stress / 100.0
-    # Estimate incoming raw stress for spike detection (before full EMA apply)
     _raw_neg = _clamp(
         raw_probs.get("fear", 0.0) * 1.2
         + raw_probs.get("angry", 0.0) * 1.1
@@ -204,11 +201,18 @@ def fuse(
     stress_delta = abs(_raw_stress_est - prev_stress_norm)
     ema_alpha = _EMA_ALPHA_FAST if stress_delta >= _EMA_SPIKE_THRESHOLD else _EMA_ALPHA_SLOW
 
-    smoothed = {
-        e: (1 - ema_alpha) * state.ema_probs[e] + ema_alpha * raw_probs[e]
-        for e in EMOTIONS
-    }
-    state.ema_probs = _normalise(smoothed)
+    if not state.initialized:
+        # First frame: bootstrap directly from raw without smoothing
+        state.ema_probs = _normalise(raw_probs)
+        state.initialized = True
+    else:
+        smoothed = {
+            e: (1 - ema_alpha) * state.ema_probs[e] + ema_alpha * raw_probs[e]
+            for e in EMOTIONS
+        }
+        state.ema_probs = _normalise(smoothed)
+
+
 
 
     # ── Derive stress percentage ──────────────────────────────────────────

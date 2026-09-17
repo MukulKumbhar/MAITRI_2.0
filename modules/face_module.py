@@ -51,6 +51,7 @@ class FaceResult:
     blur_score:       float                  = 100.0
     is_blurry:        bool                   = False
     dip_applied:      bool                   = True
+    face_box:         Optional[dict]         = None  # {x, y, w, h} in original frame coords
 
 
 def _uniform_probs() -> Dict[str, float]:
@@ -137,18 +138,8 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         )
 
     try:
-        # Downscale for fast DIP and face detection (VGG-Face expects 224x224 internally)
-        # Downscaling from 720p to 480w delivers ~25x inference speedup on CPU
-        h, w = bgr_frame.shape[:2]
-        target_w = 480
-        if w > target_w:
-            scale = target_w / float(w)
-            small_frame = cv2.resize(bgr_frame, (target_w, int(h * scale)), interpolation=cv2.INTER_AREA)
-        else:
-            scale = 1.0
-            small_frame = bgr_frame
-
-        enhanced_frame, blur_score, is_blurry, dip_meta = enhance_face_patch(small_frame)
+        # Process input frame with DIP (shadow/lighting/melanin invariance)
+        enhanced_frame, blur_score, is_blurry, dip_meta = enhance_face_patch(bgr_frame)
 
         results = DF.analyze(
             enhanced_frame,
@@ -160,51 +151,53 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         result        = results[0]
         emotion_probs = result["emotion"]
         dominant      = result["dominant_emotion"]
-        confidence    = float(emotion_probs.get(dominant, 0.0)) / 100.0
+        face_detected = result.get("face_confidence", 1.0) > 0.0
+        confidence    = float(emotion_probs.get(dominant, 0.0)) / 100.0 if face_detected else 0.0
 
         # ── Multi-factor quality scoring ──────────────────────────────────────
-        # Factor 1: Blur gating (Laplacian-based)
-        blur_penalty = max(0.15, blur_score / 100.0) if is_blurry else 1.0
-
-        # Factor 2: Face area ratio — too small a face region = unreliable inference
+        # Factor 0: No-face / whole-frame fallback detection check (from remote fix)
+        h, w = bgr_frame.shape[:2]
         region = result.get("region")
-        area_penalty = 1.0
-        if region:
-            face_area = region.get("w", 0) * region.get("h", 0)
-            frame_area = small_frame.shape[0] * small_frame.shape[1]
-            area_ratio = face_area / max(frame_area, 1)
-            if area_ratio < 0.03:   # face < 3% of frame = too small/far
-                area_penalty = 0.70
+        is_whole_frame = (
+            region is not None
+            and region.get("w", 0) >= w - 10
+            and region.get("h", 0) >= h - 10
+        )
+        if not face_detected or is_whole_frame:
+            quality = 0.0
+            face_box = None
+        else:
+            # Factor 1: Blur gating (Laplacian-based)
+            blur_penalty = max(0.15, blur_score / 100.0) if is_blurry else 1.0
 
-        # Factor 3: Lighting quality — mean brightness of face ROI
-        lighting_penalty = 1.0
-        if region:
-            x, y, fw, fh = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
-            face_roi = small_frame[y:y+fh, x:x+fw]
-            if face_roi.size > 0:
-                mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)))
-                if mean_brightness < 30 or mean_brightness > 220:   # too dark or blown out
-                    lighting_penalty = 0.80
+            # Factor 2: Face area ratio — too small a face region = unreliable inference
+            area_penalty = 1.0
+            if region:
+                face_area = region.get("w", 0) * region.get("h", 0)
+                frame_area = small_frame.shape[0] * small_frame.shape[1]
+                area_ratio = face_area / max(frame_area, 1)
+                if area_ratio < 0.03:   # face < 3% of frame = too small/far
+                    area_penalty = 0.70
 
-        # Combine: confidence × blur × area × lighting
-        quality = min(1.0, confidence * 1.2) * blur_penalty * area_penalty * lighting_penalty
+            # Factor 3: Lighting quality — mean brightness of face ROI
+            lighting_penalty = 1.0
+            if region:
+                x, y, fw, fh = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
+                face_roi = small_frame[y:y+fh, x:x+fw]
+                if face_roi.size > 0:
+                    mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)))
+                    if mean_brightness < 30 or mean_brightness > 220:
+                        lighting_penalty = 0.80
 
+            # Combine: confidence × blur × area × lighting
+            quality = min(1.0, confidence * 1.2) * blur_penalty * area_penalty * lighting_penalty
+            face_box = region
 
         # Rescale detected face region back to original frame coordinates for crisp HUD
-        region = result.get("region")
-        scaled_region = None
-        if region and scale != 1.0:
-            scaled_region = {
-                "x": int(region.get("x", 0) / scale),
-                "y": int(region.get("y", 0) / scale),
-                "w": int(region.get("w", 0) / scale),
-                "h": int(region.get("h", 0) / scale),
-            }
-        elif region:
-            scaled_region = region
+
 
         annotated = _draw_overlay(
-            bgr_frame, dominant, emotion_probs, scaled_region,
+            bgr_frame, dominant, emotion_probs, face_box,
             blur_score=blur_score, is_blurry=is_blurry
         )
 
@@ -214,8 +207,10 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
             annotated_img=annotated, error=None,
             blur_score=blur_score, is_blurry=is_blurry,
             dip_applied=True,
+            face_box=face_box,
         )
     except Exception as exc:
+        print(f"[MAITRI] DeepFace analysis error: {exc}")
         return FaceResult(
             emotion_probs=_uniform_probs(), dominant_emotion="neutral",
             face_confidence=0.0, face_quality=0.0,
