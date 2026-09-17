@@ -1,0 +1,35 @@
+# MAITRI 2.0 — Python dependencies
+# ⚠️  REQUIRES Python 3.11 (mediapipe does not support Python 3.13+)
+#
+# RECOMMENDED SETUP (uses Anaconda — fastest, no resolver issues):
+#   conda create -n maitri python=3.11 -y
+#   conda activate maitri
+#   conda install -c conda-forge numpy pandas streamlit opencv -y
+#   pip install --prefer-binary deepface mediapipe streamlit-webrtc aiortc
+#
+# Run the app:
+#   conda activate maitri
+#   streamlit run app.py
+#
+# OR via full path without activating:
+#   /home/mikey/anaconda3/envs/maitri/bin/python -m streamlit run app.py
+#
+# ── Conda (batch 1 — fast) ─────────────────────────────────────────────
+# conda install -c conda-forge:
+numpy>=2.0.0
+pandas>=2.0.0
+streamlit>=1.35.0
+opencv-python-headless>=4.8.0   # installed as 'opencv' in conda
+
+# ── pip (batch 2 — after conda) ────────────────────────────────────────
+deepface>=0.0.93
+mediapipe>=0.10.9,<0.11.0       # pinned: requires Python < 3.13
+streamlit-webrtc>=0.47.0
+aiortc>=1.8.0
+
+# ── Voice module (future — uncomment when ready) ───────────────────────
+# speechbrain>=1.0.0
+# sounddevice>=0.4.6
+# soundfile>=0.12.1
+# librosa>=0.10.1
+
