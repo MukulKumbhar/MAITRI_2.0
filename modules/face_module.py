@@ -51,6 +51,7 @@ class FaceResult:
     blur_score:       float                  = 100.0
     is_blurry:        bool                   = False
     dip_applied:      bool                   = True
+    face_box:         Optional[dict]         = None  # {x, y, w, h} in original frame coords
 
 
 def _uniform_probs() -> Dict[str, float]:
@@ -137,18 +138,8 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         )
 
     try:
-        # Downscale for fast DIP and face detection (VGG-Face expects 224x224 internally)
-        # Downscaling from 720p to 480w delivers ~25x inference speedup on CPU
-        h, w = bgr_frame.shape[:2]
-        target_w = 480
-        if w > target_w:
-            scale = target_w / float(w)
-            small_frame = cv2.resize(bgr_frame, (target_w, int(h * scale)), interpolation=cv2.INTER_AREA)
-        else:
-            scale = 1.0
-            small_frame = bgr_frame
-
-        enhanced_frame, blur_score, is_blurry, dip_meta = enhance_face_patch(small_frame)
+        # Process input frame with DIP (shadow/lighting/melanin invariance)
+        enhanced_frame, blur_score, is_blurry, dip_meta = enhance_face_patch(bgr_frame)
 
         results = DF.analyze(
             enhanced_frame,
@@ -160,30 +151,31 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         result        = results[0]
         emotion_probs = result["emotion"]
         dominant      = result["dominant_emotion"]
-        confidence    = float(emotion_probs.get(dominant, 0.0)) / 100.0
+        face_detected = result.get("face_confidence", 1.0) > 0.0
+        confidence    = float(emotion_probs.get(dominant, 0.0)) / 100.0 if face_detected else 0.0
 
-        # Quality gating:
-        # Base quality is confidence-derived, but severely penalized if image is blurred
-        if is_blurry:
-            quality = min(1.0, confidence * 1.2) * max(0.15, blur_score / 100.0)
-        else:
-            quality = min(1.0, confidence * 1.2)
-
-        # Rescale detected face region back to original frame coordinates for crisp HUD
+        # Quality gating
+        h, w = bgr_frame.shape[:2]
         region = result.get("region")
-        scaled_region = None
-        if region and scale != 1.0:
-            scaled_region = {
-                "x": int(region.get("x", 0) / scale),
-                "y": int(region.get("y", 0) / scale),
-                "w": int(region.get("w", 0) / scale),
-                "h": int(region.get("h", 0) / scale),
-            }
-        elif region:
-            scaled_region = region
+        # If OpenCV detector defaulted to whole frame, no face was actually detected
+        is_whole_frame = (
+            region is not None
+            and region.get("w", 0) >= w - 10
+            and region.get("h", 0) >= h - 10
+        )
+
+        if not face_detected or is_whole_frame:
+            quality = 0.0
+            face_box = None
+        elif is_blurry:
+            quality = max(0.35, min(1.0, confidence * 1.2) * max(0.4, blur_score / 100.0))
+            face_box = region
+        else:
+            quality = max(0.5, min(1.0, confidence * 1.2))
+            face_box = region
 
         annotated = _draw_overlay(
-            bgr_frame, dominant, emotion_probs, scaled_region,
+            bgr_frame, dominant, emotion_probs, face_box,
             blur_score=blur_score, is_blurry=is_blurry
         )
 
@@ -193,8 +185,10 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
             annotated_img=annotated, error=None,
             blur_score=blur_score, is_blurry=is_blurry,
             dip_applied=True,
+            face_box=face_box,
         )
     except Exception as exc:
+        print(f"[MAITRI] DeepFace analysis error: {exc}")
         return FaceResult(
             emotion_probs=_uniform_probs(), dominant_emotion="neutral",
             face_confidence=0.0, face_quality=0.0,

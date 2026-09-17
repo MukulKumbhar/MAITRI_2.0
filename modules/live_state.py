@@ -41,6 +41,9 @@ class LiveState:
     is_blurry:       bool                   = False
     dip_active:      bool                   = True
 
+    # Persistent face bounding box (last detected — survives frames between DeepFace runs)
+    face_box:        Optional[Dict[str, int]] = None
+
     # Frame counter (for throttling heavy models)
     frame_count:     int                    = 0
 
@@ -62,6 +65,7 @@ class LiveState:
                 "blur_score":      self.blur_score,
                 "is_blurry":       self.is_blurry,
                 "dip_active":      self.dip_active,
+                "face_box":        dict(self.face_box) if self.face_box else None,
                 "frame_count":     self.frame_count,
             }
 

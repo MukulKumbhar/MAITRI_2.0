@@ -57,12 +57,13 @@ class FusionState:
     Persists EMA state across Streamlit reruns via st.session_state.
     Must be stored as a single object to survive reruns cleanly.
     """
-    ema_probs:      Dict[str, float] = field(default_factory=_neutral_probs)
+    ema_probs:      Dict[str, float] = field(default_factory=_uniform)
     w_face:         float = _BASE_FACE_W
     w_vitals:       float = _BASE_VITALS_W
     w_eye:          float = _BASE_EYE_W
     last_emotion:   str   = "neutral"
     last_stress:    float = 0.0
+    initialized:    bool  = False
 
 
 @dataclass
@@ -155,29 +156,30 @@ def fuse(
     w_e = state.w_eye    / total_w
 
     # ── Weighted fusion ───────────────────────────────────────────────────
-    # If face is detected with acceptable quality, facial expressions directly guide the
-    # emotion distribution, with high vitals strain modulating acute stress signals.
-    if face_probs and face_quality > 0.2:
-        if vitals_strain > 0.40:
-            raw_probs = {
-                e: 0.70 * f_probs[e] + 0.30 * v_probs[e]
-                for e in EMOTIONS
-            }
-        else:
-            raw_probs = dict(f_probs)
-    else:
-        # Camera is off or face is occluded: infer pseudo-emotions from vitals & fatigue
+    # Quality-weighted fusion across all active modalities
+    if face_probs and face_quality > 0.0:
         raw_probs = {
-            e: 0.70 * v_probs[e] + 0.30 * e_probs[e]
+            e: w_f * f_probs[e] + w_v * v_probs[e] + w_e * e_probs[e]
+            for e in EMOTIONS
+        }
+    else:
+        # Camera is off or no face detected: infer from vitals & fatigue
+        total_non_face = w_v + w_e if (w_v + w_e) > 0 else 1.0
+        raw_probs = {
+            e: (w_v / total_non_face) * v_probs[e] + (w_e / total_non_face) * e_probs[e]
             for e in EMOTIONS
         }
 
     # ── EMA temporal smoothing ────────────────────────────────────────────
-    smoothed = {
-        e: (1 - _EMA_ALPHA) * state.ema_probs[e] + _EMA_ALPHA * raw_probs[e]
-        for e in EMOTIONS
-    }
-    state.ema_probs = _normalise(smoothed)
+    if not state.initialized:
+        state.ema_probs = _normalise(raw_probs)
+        state.initialized = True
+    else:
+        smoothed = {
+            e: (1 - _EMA_ALPHA) * state.ema_probs[e] + _EMA_ALPHA * raw_probs[e]
+            for e in EMOTIONS
+        }
+        state.ema_probs = _normalise(smoothed)
 
     # ── Derive stress percentage ──────────────────────────────────────────
     # Emotional distress load from negative emotions (normalized 0.0 – 1.0)

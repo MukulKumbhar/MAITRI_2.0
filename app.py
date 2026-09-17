@@ -5,6 +5,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"]  = "3"
 os.environ["CUDA_VISIBLE_DEVICES"]  = "-1"
 
+import queue
 import threading
 import time
 import av
@@ -70,8 +71,7 @@ if "eye_state"    not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────
 # WEBRTC VIDEO PROCESSOR
 # ─────────────────────────────────────────────────────────────────────────
-_FACE_EVERY_N_FRAMES = 8   # DeepFace + DIP fast inference (~30ms) every 8th frame
-_EYE_EVERY_N_FRAMES  = 1   # MediaPipe ~2ms  — run every frame
+_EYE_EVERY_N_FRAMES = 3   # MediaPipe: sufficient at ~10 FPS, cuts CPU by 66%
 
 class MAITRIVideoProcessor:
     """
@@ -79,17 +79,65 @@ class MAITRIVideoProcessor:
     State is passed via constructor (NOT read from st.session_state,
     which is unavailable in WebRTC worker threads).
     ML libraries (TF, MediaPipe) only load when the first frame arrives.
+
+    Performance architecture:
+    - DeepFace (heavy, 200–500ms on CPU) runs in a separate daemon worker thread.
+      recv() drops a frame into a single-slot queue (non-blocking put_nowait).
+      If DeepFace is busy, the frame is silently dropped — the live video
+      feed is NEVER delayed by inference.
+    - MediaPipe eye tracking runs directly in recv() but only every 3rd frame,
+      keeping landmark execution time to a fraction of the frame budget.
+    - HUD is drawn on EVERY frame using the latest cached telemetry from LiveState.
     """
 
     def __init__(self, live_state: LiveState, eye_state):
         self.live_state = live_state
         self.eye_state  = eye_state
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        """Called for every incoming video frame by streamlit-webrtc."""
-        # Lazy ML imports — TF and MediaPipe load only on first frame
+        # Single-slot queue — holds at most one pending frame for DeepFace
+        self._face_queue: queue.Queue = queue.Queue(maxsize=1)
+
+        # Daemon worker thread — runs for the lifetime of the processor
+        self._worker = threading.Thread(
+            target=self._inference_worker, daemon=True, name="deepface-worker"
+        )
+        self._worker.start()
+
+    # ── Background DeepFace worker ────────────────────────────────────────
+    def _inference_worker(self) -> None:
+        """
+        Runs in a dedicated daemon thread. Blocks on the queue, runs DeepFace,
+        and writes results back to LiveState — never touching the video pipeline.
+        """
         from modules.face_module import analyze_frame
-        from modules.eye_module  import analyze_eyes
+        while True:
+            bgr = self._face_queue.get()   # blocks until a frame is available
+            if bgr is None:
+                break                      # sentinel — graceful shutdown
+            try:
+                face = analyze_frame(bgr)
+                ls = self.live_state
+                with ls.lock:
+                    ls.face_emotion    = face.dominant_emotion
+                    ls.emotion_probs   = {
+                        k: float(v) / 100.0 for k, v in face.emotion_probs.items()
+                    }
+                    ls.face_confidence = face.face_confidence
+                    ls.face_quality    = face.face_quality
+                    ls.face_error      = face.error
+                    ls.blur_score      = face.blur_score
+                    ls.is_blurry       = face.is_blurry
+                    ls.face_box        = face.face_box
+            except Exception as exc:
+                print(f"[MAITRI] Inference worker error: {exc}")
+
+    # ── Per-frame recv callback ───────────────────────────────────────────
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        """
+        Called for EVERY incoming video frame by streamlit-webrtc.
+        Must return as fast as possible — no blocking ML calls here.
+        """
+        from modules.eye_module import analyze_eyes
 
         bgr = frame.to_ndarray(format="bgr24")
         ls  = self.live_state
@@ -98,7 +146,7 @@ class MAITRIVideoProcessor:
             ls.frame_count += 1
             fc = ls.frame_count
 
-        # ── Eye tracking — every frame (fast, MediaPipe) ──────────────────
+        # ── Eye tracking — every 3rd frame (~10 FPS) ──────────────────────
         if fc % _EYE_EVERY_N_FRAMES == 0:
             eye = analyze_eyes(bgr, self.eye_state)
             with ls.lock:
@@ -109,32 +157,32 @@ class MAITRIVideoProcessor:
                 ls.eye_quality    = eye.eye_quality
                 ls.eye_available  = eye.available
 
-        # ── Face emotion — every Nth frame (DeepFace/TF + DIP) ───────────
-        if fc % _FACE_EVERY_N_FRAMES == 0:
-            face = analyze_frame(bgr)
-            with ls.lock:
-                ls.face_emotion    = face.dominant_emotion
-                ls.emotion_probs   = {
-                    k: v / 100.0 for k, v in face.emotion_probs.items()
-                }
-                ls.face_confidence = face.face_confidence
-                ls.face_quality    = face.face_quality
-                ls.face_error      = face.error
-                ls.blur_score      = face.blur_score
-                ls.is_blurry       = face.is_blurry
-            if face.annotated_img is not None:
-                bgr = face.annotated_img
+        # ── Non-blocking DeepFace dispatch ────────────────────────────────
+        # If the worker is busy (queue full), drop the frame — NO latency buildup.
+        try:
+            self._face_queue.put_nowait(bgr)
+        except queue.Full:
+            pass
 
-        # ── Draw HUD overlay on every frame ───────────────────────────────
+        # ── Draw HUD on every frame using latest cached telemetry ─────────
         bgr = _draw_hud(bgr, ls)
 
         return av.VideoFrame.from_ndarray(bgr, format="bgr24")
 
 
 def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
-    """Draw lightweight HUD directly on the video frame."""
+    """Draw lightweight HUD and persistent face bounding box directly on the video frame."""
     snap = ls.snapshot()
     h, w = bgr.shape[:2]
+
+    # Persistent face bounding box (updates when background DeepFace completes)
+    box = snap.get("face_box")
+    if box:
+        bx, by = box.get("x", 0), box.get("y", 0)
+        bw, bh = box.get("w", 0), box.get("h", 0)
+        if bw > 0 and bh > 0:
+            box_color = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
+            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), box_color, 2)
 
     # Emotion label top-left
     emo   = snap["face_emotion"].upper()
@@ -370,7 +418,7 @@ with tab_live:
 
     with col_video:
         st.subheader("📹 Live Astronaut Feed")
-        st.caption("Face emotion every 5th frame · Eye tracking every frame")
+        st.caption("Background ML pipeline · MediaPipe Eye Tracking (~10 FPS)")
 
         rtc_config = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -389,7 +437,7 @@ with tab_live:
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             video_processor_factory=_processor_factory,
-            media_stream_constraints={"video": {"width": 1280, "height": 720}, "audio": False},
+            media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
             async_processing=True,
         )
 
