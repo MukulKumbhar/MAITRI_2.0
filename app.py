@@ -71,7 +71,7 @@ if "eye_state"    not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────
 # WEBRTC VIDEO PROCESSOR
 # ─────────────────────────────────────────────────────────────────────────
-_EYE_EVERY_N_FRAMES = 3   # MediaPipe: sufficient at ~10 FPS, cuts CPU by 66%
+_EYE_EVERY_N_FRAMES = 2   # MediaPipe: runs at ~15 FPS, optimal for catching rapid blinks
 
 class MAITRIVideoProcessor:
     """
@@ -172,35 +172,56 @@ class MAITRIVideoProcessor:
 
 
 def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
-    """Draw lightweight HUD and persistent face bounding box directly on the video frame."""
+    """Draw lightweight HUD and persistent face bounding box directly on the video frame with consistent scaling."""
     snap = ls.snapshot()
     h, w = bgr.shape[:2]
+
+    # Normalized UI scale factor relative to standard 480p reference
+    scale = max(0.55, min(w, h) / 480.0)
+    font_main = 0.72 * scale
+    font_sub  = 0.46 * scale
+    thick_main = max(1, int(2 * scale))
+    thick_sub  = max(1, int(1 * scale))
+    pad = int(4 * scale)
+
+    def _draw_pill(text, x, y, font_scale, font_thick, text_color, bg_color=(15, 20, 28)):
+        (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+        x1 = max(0, x - pad)
+        y1 = max(0, y - th - pad)
+        x2 = min(w, x + tw + pad)
+        y2 = min(h, y + baseline + pad)
+        cv2.rectangle(bgr, (x1, y1), (x2, y2), bg_color, -1)
+        cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, cv2.LINE_AA)
+        return tw, th
 
     # Persistent face bounding box (updates when background DeepFace completes)
     box = snap.get("face_box")
     if box:
         bx, by = box.get("x", 0), box.get("y", 0)
         bw, bh = box.get("w", 0), box.get("h", 0)
-        if bw > 0 and bh > 0:
+        if bw > 0 and bh > 0 and bx < w and by < h:
             box_color = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
-            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), box_color, 2)
+            box_thick = max(1, int(2 * scale))
+            cv2.rectangle(bgr, (bx, by), (min(w, bx + bw), min(h, by + bh)), box_color, box_thick)
 
     # Emotion label top-left
     emo   = snap["face_emotion"].upper()
     conf  = snap["face_confidence"] * 100
-    cv2.putText(bgr, f"{emo}  {conf:.0f}%", (12, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 230, 118), 2, cv2.LINE_AA)
+    emo_text = f"{emo}  {conf:.0f}%"
+    _draw_pill(emo_text, int(14 * scale), int(30 * scale), font_main, thick_main, (0, 230, 118))
 
-    # Eye info bottom-left
-    eye_label = f"EAR:{snap['ear']:.2f}  BLINK:{snap['blink_rate']:.0f}/min  {snap['fatigue_label']}"
-    cv2.putText(bgr, eye_label, (12, h - 16),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 1, cv2.LINE_AA)
-
-    # DIP telemetry top-right
+    # DIP telemetry top-right (dynamically measured and right-aligned)
     dip_status = "BLUR GATED" if snap["is_blurry"] else "DIP: CLAHE+GAMMA"
     dip_color  = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
-    cv2.putText(bgr, f"{dip_status}  #{snap['frame_count']}", (w - 240, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, dip_color, 1, cv2.LINE_AA)
+    dip_text   = f"{dip_status}  #{snap['frame_count']}"
+    (dtw, _), _ = cv2.getTextSize(dip_text, cv2.FONT_HERSHEY_SIMPLEX, font_sub, thick_sub)
+    dip_x = max(10, w - dtw - int(16 * scale))
+    _draw_pill(dip_text, dip_x, int(28 * scale), font_sub, thick_sub, dip_color)
+
+    # Eye info bottom-left
+    eye_label = f"EAR: {snap['ear']:.2f} | BLINK: {snap['blink_rate']:.0f}/min | {snap['fatigue_label']}"
+    _draw_pill(eye_label, int(14 * scale), h - int(14 * scale), font_sub, thick_sub, (0, 215, 255))
+
     return bgr
 
 

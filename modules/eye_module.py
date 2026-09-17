@@ -191,9 +191,9 @@ def analyze_eyes(
         baseline = sorted_ears[min(p80_idx, len(sorted_ears) - 1)]
         session.ear_baseline = float(np.clip(baseline, 0.23, 0.38))
 
-    close_thresh  = session.ear_baseline * 0.72   # Eyes must drop below this to trigger closure
-    open_thresh   = session.ear_baseline * 0.82   # Eyes must rise above this to complete blink
-    drowsy_thresh = session.ear_baseline * 0.65   # Sustained below this -> Drowsiness
+    close_thresh  = session.ear_baseline * 0.78   # Calibrated: eyes drop below 78% of baseline to close
+    open_thresh   = session.ear_baseline * 0.85   # Calibrated: eyes rise above 85% of baseline to open
+    drowsy_thresh = session.ear_baseline * 0.65   # Sustained below this -> Drowsiness (PERCLOS)
 
     # ── Dual-Threshold Hysteresis with Duration & Debounce ────────────────
     if ear < close_thresh:
@@ -201,7 +201,7 @@ def analyze_eyes(
             session.in_blink = True
             session.blink_start_time = now
 
-        # Track prolonged closure for drowsiness detection
+        # Track prolonged closure for clinical PERCLOS drowsiness
         if session.drowsy_start_time is None:
             session.drowsy_start_time = now
     else:
@@ -209,9 +209,9 @@ def analyze_eyes(
         if ear >= open_thresh:
             if session.in_blink:
                 blink_duration = now - (session.blink_start_time if session.blink_start_time else now)
-                debounce_passed = (now - session.last_blink_end_time) >= 0.12
-                # Valid biological blink duration: 70ms to 450ms
-                if 0.07 <= blink_duration <= 0.45 and debounce_passed:
+                debounce_passed = (now - session.last_blink_end_time) >= 0.10
+                # Valid biological blink duration: 40ms to 600ms
+                if 0.04 <= blink_duration <= 0.60 and debounce_passed:
                     session.blink_timestamps.append(now)
                     new_blink = True
                     session.last_blink_end_time = now
@@ -219,6 +219,9 @@ def analyze_eyes(
                 session.in_blink = False
                 session.blink_start_time = None
 
+            session.drowsy_start_time = None
+        elif not session.in_blink:
+            # Eyes are in normal resting range between close and open thresholds
             session.drowsy_start_time = None
 
     session.prev_ear = ear
@@ -229,26 +232,25 @@ def analyze_eyes(
 
     # ── Blink rate (per minute) with Warm-up Window ───────────────────────
     elapsed = min(now - session.session_start_time, _BLINK_WINDOW_SEC)
-    if elapsed < 8.0:
-        # During initial 8s warm-up, report nominal baseline rather than noisy extrapolation
-        blink_rate = 16.0 if len(session.blink_timestamps) > 0 else 0.0
+    if elapsed < 12.0:
+        # During initial 12s warm-up, report nominal baseline rather than noisy extrapolation
+        blink_rate = 15.0 if len(session.blink_timestamps) > 0 else 12.0
     else:
         blink_rate = (len(session.blink_timestamps) / max(elapsed, 1.0)) * 60.0
 
     # ── Fatigue & Eye Stress Classification ───────────────────────────────
+    # Standard PERCLOS criterion: sustained eye closure >= 700ms (not momentary blinks or glancing down)
     is_drowsy = False
     if session.drowsy_start_time is not None:
-        if (now - session.drowsy_start_time) >= 0.45:
+        if (now - session.drowsy_start_time) >= 0.70:
             is_drowsy = True
-    elif ear < drowsy_thresh and session.prev_ear < drowsy_thresh:
-        is_drowsy = True
 
     if is_drowsy:
         label, strain = "Drowsy", 0.80
-    elif blink_rate > 30.0 and elapsed >= 10.0:
+    elif blink_rate > 28.0 and elapsed >= 15.0:
         label, strain = "Stressed Eyes", 0.55
-    elif blink_rate < 8.0 and elapsed >= 20.0:
-        label, strain = "Hyperfocused", 0.40
+    elif blink_rate < 6.0 and elapsed >= 30.0 and len(session.open_ear_history) >= 20:
+        label, strain = "Hyperfocused", 0.35
     else:
         label, strain = "Normal", 0.10
 

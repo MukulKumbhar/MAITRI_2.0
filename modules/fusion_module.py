@@ -156,14 +156,12 @@ def fuse(
     w_e = state.w_eye    / total_w
 
     # ── Weighted fusion ───────────────────────────────────────────────────
-    # Quality-weighted fusion across all active modalities
-    if face_probs and face_quality > 0.0:
-        raw_probs = {
-            e: w_f * f_probs[e] + w_v * v_probs[e] + w_e * e_probs[e]
-            for e in EMOTIONS
-        }
+    # When face is detected with acceptable quality (>= 0.30), the fused emotion
+    # distribution directly tracks the facial affect without neutral-diluting priors.
+    if face_probs and face_quality >= 0.30:
+        raw_probs = dict(f_probs)
     else:
-        # Camera is off or no face detected: infer from vitals & fatigue
+        # Camera is off or no face detected: infer affective distribution from vitals & fatigue
         total_non_face = w_v + w_e if (w_v + w_e) > 0 else 1.0
         raw_probs = {
             e: (w_v / total_non_face) * v_probs[e] + (w_e / total_non_face) * e_probs[e]
@@ -184,16 +182,18 @@ def fuse(
     # ── Derive stress percentage ──────────────────────────────────────────
     # Emotional distress load from negative emotions (normalized 0.0 – 1.0)
     # Fear and anger indicate acute acute alarm/distress; sad is depressive/withdrawal; disgust is aversion.
-    neg_score = _clamp(
-        state.ema_probs.get("fear", 0.0) * 1.2
-        + state.ema_probs.get("angry", 0.0) * 1.1
-        + state.ema_probs.get("sad", 0.0) * 1.0
-        + state.ema_probs.get("disgust", 0.0) * 0.7
+    neg_score = (
+        state.ema_probs.get("fear", 0.0) * 1.20
+        + state.ema_probs.get("angry", 0.0) * 1.10
+        + state.ema_probs.get("sad", 0.0) * 0.90
+        + state.ema_probs.get("disgust", 0.0) * 0.60
     )
+    happy_score = state.ema_probs.get("happy", 0.0)
+    emo_stress  = _clamp(neg_score - 0.40 * happy_score)
 
     # 3-modality quality-weighted composite stress
     composite_stress = (
-        w_f * neg_score
+        w_f * emo_stress
         + w_v * vitals_strain
         + w_e * fatigue_strain
     )
@@ -201,35 +201,34 @@ def fuse(
     # ── Context-Aware Clinical Cross-Validation Rules ─────────────────────
     # Case A: Physical Exertion (Cardiovascular workload with calm facial affect)
     is_physical_exertion = (
-        vitals_strain >= 0.35
-        and neg_score < 0.18
+        vitals_strain >= 0.30
+        and emo_stress < 0.20
         and fatigue_strain < 0.45
     )
 
     # Case B: Compound Sympathetic Hyper-Arousal (Multi-system alarm: vitals + face + eyes)
     is_compound_panic = (
         vitals_strain >= 0.35
-        and neg_score >= 0.30
-        and fatigue_strain >= 0.40
+        and emo_stress >= 0.25
+        and fatigue_strain >= 0.35
     )
 
     if is_physical_exertion:
-        # Prevent physical workload/exercise from triggering false psychological panic
-        stress_raw = 0.35 * vitals_strain + 0.65 * neg_score
-        stress_raw = min(0.48, stress_raw)   # Cap at mild workload band
+        # Cardiovascular workout: acknowledge physical workload without false panic
+        # Maps comfortably into the 30% – 48% Mild Workload range
+        workload_stress = 0.60 * vitals_strain + 0.40 * composite_stress
+        stress_raw = min(0.48, max(0.28, workload_stress))
     elif is_compound_panic:
         # Multi-modal confirmation amplifies confidence of acute distress
-        stress_raw = min(1.0, max(composite_stress, 0.75 * neg_score, 0.75 * vitals_strain) * 1.20)
+        stress_raw = min(1.0, max(composite_stress, 0.75 * emo_stress, 0.75 * vitals_strain) * 1.25)
     else:
-        # Standard baseline single-modality acute overrides
-        stress_raw = max(
-            composite_stress,
-            0.80 * vitals_strain,
-            0.75 * neg_score,
-            0.70 * fatigue_strain if fatigue_strain >= 0.70 else 0.0,
-        )
+        # Standard baseline: responsive to acute spikes in any single modality
+        acute_vitals = vitals_strain if vitals_strain >= 0.70 else (0.80 * vitals_strain if vitals_strain >= 0.40 else 0.0)
+        acute_emo    = 0.80 * emo_stress if emo_stress >= 0.35 else 0.0
+        acute_eye    = 0.70 * fatigue_strain if fatigue_strain >= 0.70 else 0.0
+        stress_raw = max(composite_stress, acute_vitals, acute_emo, acute_eye)
 
-    stress_pct = round(_clamp(stress_raw) * 100, 2)
+    stress_pct = round(_clamp(stress_raw) * 100, 1)
 
     dominant = max(state.ema_probs, key=state.ema_probs.get)
     state.last_emotion = dominant
