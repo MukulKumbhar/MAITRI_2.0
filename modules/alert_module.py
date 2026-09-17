@@ -156,21 +156,49 @@ def classify_stress(stress_pct: float) -> str:
         return "NOMINAL"
 
 
-def get_alert(stress_pct: float, dominant_emotion: str) -> AlertResult:
+def get_alert(
+    stress_pct: float,
+    dominant_emotion: str,
+    fatigue_label: str = "Normal",
+) -> AlertResult:
     """
     Return the appropriate alert + support message.
-    Emotion-specific overrides take priority at ELEVATED/CRITICAL levels.
+    Emotion-specific overrides take priority whenever distress emotions are detected or stress is elevated.
+    Fatigue guidance activates when eye drowsiness is detected.
     """
     level = classify_stress(stress_pct)
     emotion_key = dominant_emotion.lower()
 
-    # Apply emotion override only at elevated/critical stress
-    if level in ("ELEVATED", "CRITICAL") and emotion_key in EMOTION_OVERRIDES:
+    # Distress emotions: fear, anger, sadness
+    is_distress_emotion = emotion_key in ("fear", "angry", "sad")
+
+    # Apply emotion override if:
+    # 1. Stress is MILD, ELEVATED, or CRITICAL and emotion has a specific countermeasure
+    # 2. Dominant emotion is an acute distress emotion (even before vitals catch up)
+    if (level in ("MILD", "ELEVATED", "CRITICAL") or is_distress_emotion) and emotion_key in EMOTION_OVERRIDES:
         override = EMOTION_OVERRIDES[emotion_key]
+        # Promote effective level to at least MILD if displaying distress
+        if level == "NOMINAL" and is_distress_emotion:
+            level = "MILD"
         msg = {
             "header":    override["header"],
             "body":      override["body"],
             "technique": override["technique"],
+        }
+    elif fatigue_label == "Drowsy" and level in ("NOMINAL", "MILD", "ELEVATED"):
+        level = "ELEVATED" if level == "ELEVATED" else "MILD"
+        msg = {
+            "header": "Fatigue Alert — Drowsiness Detected",
+            "body": (
+                "Sustained low Eye Aspect Ratio (EAR) indicates significant eyelid closure "
+                "and micro-sleep hazard. Immediate rest recommended."
+            ),
+            "technique": (
+                "**20-20-20 Eye Rest & Micro-Nap Protocol:**\n"
+                "1. Look away from display screens at an object 20 feet away for 20 seconds.\n"
+                "2. Blink deliberately 10 times.\n"
+                "3. If operational schedule permits, initiate a 15-minute cabin rest cycle."
+            ),
         }
     else:
         msg = SUPPORT_MESSAGES[level]

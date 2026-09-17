@@ -6,6 +6,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"]  = "3"
 os.environ["CUDA_VISIBLE_DEVICES"]  = "-1"
 
 import threading
+import time
 import av
 import cv2
 import numpy as np
@@ -69,8 +70,8 @@ if "eye_state"    not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────
 # WEBRTC VIDEO PROCESSOR
 # ─────────────────────────────────────────────────────────────────────────
-_FACE_EVERY_N_FRAMES = 5   # DeepFace ~100ms — run every 5th frame
-_EYE_EVERY_N_FRAMES  = 1   # MediaPipe ~10ms  — run every frame
+_FACE_EVERY_N_FRAMES = 8   # DeepFace + DIP fast inference (~30ms) every 8th frame
+_EYE_EVERY_N_FRAMES  = 1   # MediaPipe ~2ms  — run every frame
 
 class MAITRIVideoProcessor:
     """
@@ -166,128 +167,68 @@ st.markdown(
 st.markdown("---")
 
 # ─────────────────────────────────────────────────────────────────────────
-# TABS
+# LIVE TELEMETRY FRAGMENTS (Smooth 1 Hz Refresh Without UI Lock)
 # ─────────────────────────────────────────────────────────────────────────
-tab_live, tab_logs = st.tabs(["🔴 Live Monitoring", "📊 Mission Logs & Trends"])
-
-# ═════════════════════════════════════════════════════════════════════════
-# TAB 1 — LIVE MONITORING
-# ═════════════════════════════════════════════════════════════════════════
-with tab_live:
-
-    if not _WEBRTC_OK:
-        st.error(
-            "**streamlit-webrtc not installed.** Run:\n"
-            "```\n/home/mikey/anaconda3/envs/maitri/bin/pip install streamlit-webrtc aiortc\n```"
-        )
-        st.stop()
-
-    # ── ROW 1: Live Video + Vitals ────────────────────────────────────────
-    col_video, col_vitals = st.columns([1.4, 1.0], gap="medium")
-
-    with col_video:
-        st.subheader("📹 Live Astronaut Feed")
-        st.caption("Face emotion every 5th frame · Eye tracking every frame")
-
-        rtc_config = RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-        )
-
-        # ── Capture state refs on MAIN thread before passing to factory ───
-        _live_state = st.session_state.live_state
-        _eye_state  = st.session_state.eye_state
-
-        def _processor_factory():
-            """Closure — captures state from main thread, safe for worker."""
-            return MAITRIVideoProcessor(_live_state, _eye_state)
-
-        ctx = webrtc_streamer(
-            key="maitri-live",
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration=rtc_config,
-            video_processor_factory=_processor_factory,
-            media_stream_constraints={"video": {"width": 1280, "height": 720}, "audio": False},
-            async_processing=True,
-        )
-
-        if ctx.state.playing:
-            snap_v = st.session_state.live_state.snapshot()
-            blur_status = (
-                "<span style='color:#f39c12;'>⚠️ Motion Blur (Fusion Gated)</span>"
-                if snap_v["is_blurry"]
-                else f"<span style='color:#2ecc71;'>✅ Sharp ({snap_v['blur_score']:.0f})</span>"
-            )
-            st.markdown(
-                f"<div style='background:#1b2838;padding:8px 12px;border-radius:6px;font-size:0.83rem;margin-top:6px;border:1px solid #2a475e;'>"
-                f"🛡️ <b>DIP Pipeline:</b> CLAHE (LAB) + Adaptive Gamma (Melanin Invariant) + Unsharp Mask &nbsp;|&nbsp; "
-                f"<b>Clarity:</b> {blur_status}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-    with col_vitals:
-        st.subheader("💓 Physiological Telemetry")
-        st.caption("Adjust sliders to reflect sensor readings")
-
-        heart_rate = st.slider("❤️  Heart Rate (BPM)",      50,  160, 75)
-        skin_temp  = st.slider("🌡️  Skin Temperature (°C)", 35.0, 40.0, 36.6, step=0.1)
-        spo2       = st.slider("🫁  Blood Oxygen (SpO₂ %)", 85,  100, 98)
-
-        vitals = compute_vitals_strain(heart_rate, skin_temp, float(spo2))
-
-        v1, v2, v3 = st.columns(3)
-        v1.metric("HR Strain",   f"{vitals.hr_strain*100:.0f}%")
-        v2.metric("Temp Strain", f"{vitals.temp_strain*100:.0f}%")
-        v3.metric("SpO₂ Strain", f"{vitals.spo2_strain*100:.0f}%")
-
-        vitals_color = {"Normal": "#2ecc71", "Elevated": "#e67e22", "Critical": "#e74c3c"}.get(
-            vitals.status, "#aaa"
+def _render_dip_status(is_playing: bool):
+    if is_playing:
+        snap_v = st.session_state.live_state.snapshot()
+        blur_status = (
+            "<span style='color:#f39c12;'>⚠️ Motion Blur (Fusion Gated)</span>"
+            if snap_v["is_blurry"]
+            else f"<span style='color:#2ecc71;'>✅ Sharp ({snap_v['blur_score']:.0f})</span>"
         )
         st.markdown(
-            f"<span class='stress-badge' style='background:{vitals_color};'>"
-            f"Vitals: {vitals.status}</span>",
+            f"<div style='background:#1b2838;padding:8px 12px;border-radius:6px;font-size:0.83rem;margin-top:6px;border:1px solid #2a475e;'>"
+            f"🛡️ <b>DIP Pipeline:</b> CLAHE (LAB) + Adaptive Gamma (Melanin Invariant) + Unsharp Mask &nbsp;|&nbsp; "
+            f"<b>Clarity:</b> {blur_status}"
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-        st.markdown("---")
-        st.subheader("👁️ Eye Tracking (Live)")
-        ls_snap = st.session_state.live_state.snapshot()
 
-        if ctx.state.playing:
-            e1, e2 = st.columns(2)
-            e1.metric("EAR", f"{ls_snap['ear']:.3f}")
-            e2.metric("Blink Rate", f"{ls_snap['blink_rate']:.1f} /min")
-            eye_color = {
-                "Normal": "#2ecc71", "Drowsy": "#e74c3c",
-                "Stressed Eyes": "#e67e22", "Hyperfocused": "#f1c40f",
-            }.get(ls_snap["fatigue_label"], "#aaa")
-            st.markdown(
-                f"<span class='stress-badge' style='background:{eye_color};'>"
-                f"👁️ {ls_snap['fatigue_label']}</span>",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Frames processed: {ls_snap['frame_count']}")
-        else:
-            st.info("▶️ Start the camera stream to begin eye tracking.")
+@st.fragment(run_every=1.0)
+def _render_eye_panel(is_playing: bool):
+    ls_snap = st.session_state.live_state.snapshot()
+    if is_playing:
+        e1, e2 = st.columns(2)
+        e1.metric("EAR", f"{ls_snap['ear']:.3f}")
+        e2.metric("Blink Rate", f"{ls_snap['blink_rate']:.1f} /min")
+        eye_color = {
+            "Normal": "#2ecc71", "Drowsy": "#e74c3c",
+            "Stressed Eyes": "#e67e22", "Hyperfocused": "#f1c40f",
+        }.get(ls_snap["fatigue_label"], "#aaa")
+        st.markdown(
+            f"<span class='stress-badge' style='background:{eye_color};'>"
+            f"👁️ {ls_snap['fatigue_label']}</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"Frames processed: {ls_snap['frame_count']}")
+    else:
+        st.info("▶️ Start the camera stream to begin eye tracking.")
 
-    # ── ROW 2: Stress Assessment ──────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("🧠 Live Multimodal Stress Assessment")
 
+@st.fragment(run_every=1.0)
+def _render_live_assessment(
+    heart_rate: float,
+    skin_temp: float,
+    spo2: float,
+    vitals_strain: float,
+    is_playing: bool,
+):
     ls_snap = st.session_state.live_state.snapshot()
 
     # Build fusion inputs from live state
-    face_probs   = ls_snap["emotion_probs"] if ctx.state.playing else None
-    face_quality = ls_snap["face_quality"]  if ctx.state.playing else 0.0
+    face_probs   = ls_snap["emotion_probs"] if is_playing else None
+    face_quality = ls_snap["face_quality"]  if is_playing else 0.0
     face_emotion = ls_snap["face_emotion"]
 
     fusion = fuse(
         state          = st.session_state.fusion_state,
         face_probs     = face_probs,
         face_quality   = face_quality,
-        vitals_strain  = vitals.vitals_strain,
+        vitals_strain  = vitals_strain,
         fatigue_strain = ls_snap["fatigue_strain"],
-        eye_quality    = ls_snap["eye_quality"] if ctx.state.playing else 0.0,
+        eye_quality    = ls_snap["eye_quality"] if is_playing else 0.0,
     )
 
     # ── Metrics strip ─────────────────────────────────────────────────────
@@ -325,7 +266,7 @@ with tab_live:
             )
 
     with gauge_col:
-        alert = get_alert(fusion.stress_pct, fusion.dominant_emotion)
+        alert = get_alert(fusion.stress_pct, fusion.dominant_emotion, ls_snap.get("fatigue_label", "Normal"))
         st.markdown("**Stress Level**")
         st.markdown(
             f"<div style='text-align:center;padding:12px;border-radius:12px;"
@@ -398,12 +339,100 @@ with tab_live:
                 alert_triggered = alert.alert_label,
                 response_msg    = alert.body,
             )
-            st.success("✅ Mission telemetry logged.")
+            st.session_state["last_logged_time"] = time.time()
 
-    # ── Auto-refresh when stream is active ───────────────────────────────
-    if ctx.state.playing:
-        st.caption("🔄 Dashboard updates on each Streamlit interaction. "
-                   "Move a slider or press a key to refresh live data.")
+        if time.time() - st.session_state.get("last_logged_time", 0) < 4.0:
+            st.success("✅ Mission telemetry logged to database.")
+
+    if is_playing:
+        st.caption("⚡ Real-time Telemetry: Live assessment & support engine updating dynamically (1 Hz).")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────────────────────────────────
+tab_live, tab_logs = st.tabs(["🔴 Live Monitoring", "📊 Mission Logs & Trends"])
+
+# ═════════════════════════════════════════════════════════════════════════
+# TAB 1 — LIVE MONITORING
+# ═════════════════════════════════════════════════════════════════════════
+with tab_live:
+
+    if not _WEBRTC_OK:
+        st.error(
+            "**streamlit-webrtc not installed.** Run:\n"
+            "```\n/home/mikey/anaconda3/envs/maitri/bin/pip install streamlit-webrtc aiortc\n```"
+        )
+        st.stop()
+
+    # ── ROW 1: Live Video + Vitals ────────────────────────────────────────
+    col_video, col_vitals = st.columns([1.4, 1.0], gap="medium")
+
+    with col_video:
+        st.subheader("📹 Live Astronaut Feed")
+        st.caption("Face emotion every 5th frame · Eye tracking every frame")
+
+        rtc_config = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
+
+        # ── Capture state refs on MAIN thread before passing to factory ───
+        _live_state = st.session_state.live_state
+        _eye_state  = st.session_state.eye_state
+
+        def _processor_factory():
+            """Closure — captures state from main thread, safe for worker."""
+            return MAITRIVideoProcessor(_live_state, _eye_state)
+
+        ctx = webrtc_streamer(
+            key="maitri-live",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=rtc_config,
+            video_processor_factory=_processor_factory,
+            media_stream_constraints={"video": {"width": 1280, "height": 720}, "audio": False},
+            async_processing=True,
+        )
+
+        _render_dip_status(ctx.state.playing)
+
+    with col_vitals:
+        st.subheader("💓 Physiological Telemetry")
+        st.caption("Adjust sliders to reflect sensor readings")
+
+        heart_rate = st.slider("❤️  Heart Rate (BPM)",      50,  160, 75)
+        skin_temp  = st.slider("🌡️  Skin Temperature (°C)", 35.0, 40.0, 36.6, step=0.1)
+        spo2       = st.slider("🫁  Blood Oxygen (SpO₂ %)", 85,  100, 98)
+
+        vitals = compute_vitals_strain(heart_rate, skin_temp, float(spo2))
+
+        v1, v2, v3 = st.columns(3)
+        v1.metric("HR Strain",   f"{vitals.hr_strain*100:.0f}%")
+        v2.metric("Temp Strain", f"{vitals.temp_strain*100:.0f}%")
+        v3.metric("SpO₂ Strain", f"{vitals.spo2_strain*100:.0f}%")
+
+        vitals_color = {"Normal": "#2ecc71", "Elevated": "#e67e22", "Critical": "#e74c3c"}.get(
+            vitals.status, "#aaa"
+        )
+        st.markdown(
+            f"<span class='stress-badge' style='background:{vitals_color};'>"
+            f"Vitals: {vitals.status}</span>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("---")
+        st.subheader("👁️ Eye Tracking (Live)")
+        _render_eye_panel(ctx.state.playing)
+
+    # ── ROW 2 & ROW 3: Live Assessment & Autonomous Psychological Support ──
+    st.markdown("---")
+    st.subheader("🧠 Live Multimodal Stress Assessment")
+    _render_live_assessment(
+        heart_rate=heart_rate,
+        skin_temp=skin_temp,
+        spo2=spo2,
+        vitals_strain=vitals.vitals_strain,
+        is_playing=ctx.state.playing,
+    )
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 2 — MISSION LOGS

@@ -13,12 +13,12 @@ from typing import Dict, Optional
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 
 # Base modality weights (must sum to 1.0)
-_BASE_FACE_W    = 0.60
-_BASE_VITALS_W  = 0.25
+_BASE_FACE_W    = 0.50
+_BASE_VITALS_W  = 0.35
 _BASE_EYE_W     = 0.15
 
 # EMA alpha for temporal smoothing of fused probabilities
-_EMA_ALPHA = 0.15
+_EMA_ALPHA = 0.35
 
 # EMA alpha for quality gate weight adjustment
 _GATE_ALPHA = 0.05
@@ -40,6 +40,13 @@ def _normalise(probs: Dict[str, float]) -> Dict[str, float]:
     return {e: probs.get(e, 0.0) / total for e in EMOTIONS}
 
 
+def _neutral_probs() -> Dict[str, float]:
+    return {
+        "angry": 0.0, "disgust": 0.0, "fear": 0.0,
+        "happy": 0.0, "neutral": 1.0, "sad": 0.0, "surprise": 0.0
+    }
+
+
 def _uniform() -> Dict[str, float]:
     return {e: 1.0 / len(EMOTIONS) for e in EMOTIONS}
 
@@ -50,7 +57,7 @@ class FusionState:
     Persists EMA state across Streamlit reruns via st.session_state.
     Must be stored as a single object to survive reruns cleanly.
     """
-    ema_probs:      Dict[str, float] = field(default_factory=_uniform)
+    ema_probs:      Dict[str, float] = field(default_factory=_neutral_probs)
     w_face:         float = _BASE_FACE_W
     w_vitals:       float = _BASE_VITALS_W
     w_eye:          float = _BASE_EYE_W
@@ -125,7 +132,7 @@ def fuse(
         eye_quality:    1 if MediaPipe data is available, 0 if not
     """
     # ── Build per-modality probability vectors ────────────────────────────
-    f_probs = _normalise(face_probs) if face_probs else _uniform()
+    f_probs = _normalise(face_probs) if face_probs else _neutral_probs()
     v_probs = _normalise(_vitals_to_probs(vitals_strain))
     e_probs = _normalise(_eye_to_probs(fatigue_strain))
 
@@ -148,10 +155,22 @@ def fuse(
     w_e = state.w_eye    / total_w
 
     # ── Weighted fusion ───────────────────────────────────────────────────
-    raw_probs = {
-        e: w_f * f_probs[e] + w_v * v_probs[e] + w_e * e_probs[e]
-        for e in EMOTIONS
-    }
+    # If face is detected with acceptable quality, facial expressions directly guide the
+    # emotion distribution, with high vitals strain modulating acute stress signals.
+    if face_probs and face_quality > 0.2:
+        if vitals_strain > 0.40:
+            raw_probs = {
+                e: 0.70 * f_probs[e] + 0.30 * v_probs[e]
+                for e in EMOTIONS
+            }
+        else:
+            raw_probs = dict(f_probs)
+    else:
+        # Camera is off or face is occluded: infer pseudo-emotions from vitals & fatigue
+        raw_probs = {
+            e: 0.70 * v_probs[e] + 0.30 * e_probs[e]
+            for e in EMOTIONS
+        }
 
     # ── EMA temporal smoothing ────────────────────────────────────────────
     smoothed = {
@@ -161,15 +180,31 @@ def fuse(
     state.ema_probs = _normalise(smoothed)
 
     # ── Derive stress percentage ──────────────────────────────────────────
-    # Stress = weighted sum of negative emotion probabilities
-    neg_score = (
-        state.ema_probs["sad"]     * 0.35
-        + state.ema_probs["angry"] * 0.25
-        + state.ema_probs["fear"]  * 0.25
-        + state.ema_probs["disgust"] * 0.15
+    # Emotional distress load from negative emotions (normalized 0.0 – 1.0)
+    # Fear and anger indicate acute acute alarm/distress; sad is depressive/withdrawal; disgust is aversion.
+    neg_score = _clamp(
+        state.ema_probs.get("fear", 0.0) * 1.2
+        + state.ema_probs.get("angry", 0.0) * 1.1
+        + state.ema_probs.get("sad", 0.0) * 1.0
+        + state.ema_probs.get("disgust", 0.0) * 0.7
     )
-    # Blend emotion stress signal with raw vitals strain for physiological grounding
-    stress_raw = 0.65 * neg_score + 0.35 * vitals_strain
+
+    # 3-modality quality-weighted composite stress
+    composite_stress = (
+        w_f * neg_score
+        + w_v * vitals_strain
+        + w_e * fatigue_strain
+    )
+
+    # Acute single-modality override:
+    # Extreme stressors (severe hypoxia/tachycardia, acute panic/fear, or severe drowsiness)
+    # elevate the stress index even if another modality is currently passive/neutral.
+    stress_raw = max(
+        composite_stress,
+        0.80 * vitals_strain,
+        0.75 * neg_score,
+        0.70 * fatigue_strain if fatigue_strain >= 0.70 else 0.0,
+    )
     stress_pct = round(_clamp(stress_raw) * 100, 2)
 
     dominant = max(state.ema_probs, key=state.ema_probs.get)
