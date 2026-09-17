@@ -71,49 +71,48 @@ if "eye_state"    not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────
 # WEBRTC VIDEO PROCESSOR
 # ─────────────────────────────────────────────────────────────────────────
-_EYE_EVERY_N_FRAMES = 3   # MediaPipe: sufficient at ~10 FPS, cuts CPU by 66%
+_EYE_EVERY_N_FRAMES = 3   # kept for reference — eye worker throttles internally
 
 class MAITRIVideoProcessor:
     """
     Processes each WebRTC video frame in a background thread.
     State is passed via constructor (NOT read from st.session_state,
     which is unavailable in WebRTC worker threads).
-    ML libraries (TF, MediaPipe) only load when the first frame arrives.
 
-    Performance architecture:
-    - DeepFace (heavy, 200–500ms on CPU) runs in a separate daemon worker thread.
-      recv() drops a frame into a single-slot queue (non-blocking put_nowait).
-      If DeepFace is busy, the frame is silently dropped — the live video
-      feed is NEVER delayed by inference.
-    - MediaPipe eye tracking runs directly in recv() but only every 3rd frame,
-      keeping landmark execution time to a fraction of the frame budget.
-    - HUD is drawn on EVERY frame using the latest cached telemetry from LiveState.
+    Performance architecture (ZERO-BLOCKING recv()):
+    - DeepFace runs in dedicated daemon thread — single-slot queue, frames dropped when busy.
+    - MediaPipe eye tracking ALSO runs in its own daemon thread — single-slot queue.
+    - recv() does NOTHING except: copy frame → try_enqueue both queues → draw HUD → return.
+    - HUD uses only cached LiveState — never waits for inference.
     """
 
     def __init__(self, live_state: LiveState, eye_state):
         self.live_state = live_state
         self.eye_state  = eye_state
 
-        # Single-slot queue — holds at most one pending frame for DeepFace
+        # Single-slot queues — if worker busy, frame dropped (no backlog, no lag)
         self._face_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._eye_queue:  queue.Queue = queue.Queue(maxsize=1)
 
-        # Daemon worker thread — runs for the lifetime of the processor
-        self._worker = threading.Thread(
-            target=self._inference_worker, daemon=True, name="deepface-worker"
+        # DeepFace worker
+        self._face_worker = threading.Thread(
+            target=self._face_inference_worker, daemon=True, name="deepface-worker"
         )
-        self._worker.start()
+        self._face_worker.start()
+
+        # MediaPipe eye worker
+        self._eye_worker = threading.Thread(
+            target=self._eye_inference_worker, daemon=True, name="eye-worker"
+        )
+        self._eye_worker.start()
 
     # ── Background DeepFace worker ────────────────────────────────────────
-    def _inference_worker(self) -> None:
-        """
-        Runs in a dedicated daemon thread. Blocks on the queue, runs DeepFace,
-        and writes results back to LiveState — never touching the video pipeline.
-        """
+    def _face_inference_worker(self) -> None:
         from modules.face_module import analyze_frame
         while True:
-            bgr = self._face_queue.get()   # blocks until a frame is available
+            bgr = self._face_queue.get()
             if bgr is None:
-                break                      # sentinel — graceful shutdown
+                break
             try:
                 face = analyze_frame(bgr)
                 ls = self.live_state
@@ -129,44 +128,53 @@ class MAITRIVideoProcessor:
                     ls.is_blurry       = face.is_blurry
                     ls.face_box        = face.face_box
             except Exception as exc:
-                print(f"[MAITRI] Inference worker error: {exc}")
+                print(f"[MAITRI] Face worker error: {exc}")
 
-    # ── Per-frame recv callback ───────────────────────────────────────────
+    # ── Background Eye worker ─────────────────────────────────────────────
+    def _eye_inference_worker(self) -> None:
+        from modules.eye_module import analyze_eyes
+        while True:
+            bgr = self._eye_queue.get()
+            if bgr is None:
+                break
+            try:
+                eye = analyze_eyes(bgr, self.eye_state)
+                ls  = self.live_state
+                with ls.lock:
+                    ls.ear            = eye.ear
+                    ls.blink_rate     = eye.blink_rate
+                    ls.fatigue_label  = eye.fatigue_label
+                    ls.fatigue_strain = eye.fatigue_strain
+                    ls.eye_quality    = eye.eye_quality
+                    ls.eye_available  = eye.available
+            except Exception as exc:
+                print(f"[MAITRI] Eye worker error: {exc}")
+
+    # ── Per-frame recv callback — ZERO blocking ───────────────────────────
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         """
         Called for EVERY incoming video frame by streamlit-webrtc.
-        Must return as fast as possible — no blocking ML calls here.
+        Returns immediately — all ML inference happens in background threads.
         """
-        from modules.eye_module import analyze_eyes
-
         bgr = frame.to_ndarray(format="bgr24")
         ls  = self.live_state
 
         with ls.lock:
             ls.frame_count += 1
-            fc = ls.frame_count
 
-        # ── Eye tracking — every 3rd frame (~10 FPS) ──────────────────────
-        if fc % _EYE_EVERY_N_FRAMES == 0:
-            eye = analyze_eyes(bgr, self.eye_state)
-            with ls.lock:
-                ls.ear            = eye.ear
-                ls.blink_rate     = eye.blink_rate
-                ls.fatigue_label  = eye.fatigue_label
-                ls.fatigue_strain = eye.fatigue_strain
-                ls.eye_quality    = eye.eye_quality
-                ls.eye_available  = eye.available
-
-        # ── Non-blocking DeepFace dispatch ────────────────────────────────
-        # If the worker is busy (queue full), drop the frame — NO latency buildup.
+        # Non-blocking dispatch to both workers — drop if busy
         try:
             self._face_queue.put_nowait(bgr)
         except queue.Full:
             pass
 
-        # ── Draw HUD on every frame using latest cached telemetry ─────────
-        bgr = _draw_hud(bgr, ls)
+        try:
+            self._eye_queue.put_nowait(bgr)
+        except queue.Full:
+            pass
 
+        # Draw HUD using latest cached telemetry only
+        bgr = _draw_hud(bgr, ls)
         return av.VideoFrame.from_ndarray(bgr, format="bgr24")
 
 
