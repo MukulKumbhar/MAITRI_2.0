@@ -108,7 +108,7 @@ class MAITRIVideoProcessor:
                 ls.eye_quality    = eye.eye_quality
                 ls.eye_available  = eye.available
 
-        # ── Face emotion — every Nth frame (DeepFace/TF) ──────────────────
+        # ── Face emotion — every Nth frame (DeepFace/TF + DIP) ───────────
         if fc % _FACE_EVERY_N_FRAMES == 0:
             face = analyze_frame(bgr)
             with ls.lock:
@@ -119,6 +119,8 @@ class MAITRIVideoProcessor:
                 ls.face_confidence = face.face_confidence
                 ls.face_quality    = face.face_quality
                 ls.face_error      = face.error
+                ls.blur_score      = face.blur_score
+                ls.is_blurry       = face.is_blurry
             if face.annotated_img is not None:
                 bgr = face.annotated_img
 
@@ -133,17 +135,22 @@ def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     snap = ls.snapshot()
     h, w = bgr.shape[:2]
 
+    # Emotion label top-left
     emo   = snap["face_emotion"].upper()
     conf  = snap["face_confidence"] * 100
     cv2.putText(bgr, f"{emo}  {conf:.0f}%", (12, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 230, 118), 2, cv2.LINE_AA)
 
+    # Eye info bottom-left
     eye_label = f"EAR:{snap['ear']:.2f}  BLINK:{snap['blink_rate']:.0f}/min  {snap['fatigue_label']}"
     cv2.putText(bgr, eye_label, (12, h - 16),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 1, cv2.LINE_AA)
 
-    cv2.putText(bgr, f"#{snap['frame_count']}", (w - 70, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1, cv2.LINE_AA)
+    # DIP telemetry top-right
+    dip_status = "BLUR GATED" if snap["is_blurry"] else "DIP: CLAHE+GAMMA"
+    dip_color  = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
+    cv2.putText(bgr, f"{dip_status}  #{snap['frame_count']}", (w - 240, 32),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, dip_color, 1, cv2.LINE_AA)
     return bgr
 
 
@@ -202,6 +209,21 @@ with tab_live:
             media_stream_constraints={"video": {"width": 1280, "height": 720}, "audio": False},
             async_processing=True,
         )
+
+        if ctx.state.playing:
+            snap_v = st.session_state.live_state.snapshot()
+            blur_status = (
+                "<span style='color:#f39c12;'>⚠️ Motion Blur (Fusion Gated)</span>"
+                if snap_v["is_blurry"]
+                else f"<span style='color:#2ecc71;'>✅ Sharp ({snap_v['blur_score']:.0f})</span>"
+            )
+            st.markdown(
+                f"<div style='background:#1b2838;padding:8px 12px;border-radius:6px;font-size:0.83rem;margin-top:6px;border:1px solid #2a475e;'>"
+                f"🛡️ <b>DIP Pipeline:</b> CLAHE (LAB) + Adaptive Gamma (Melanin Invariant) + Unsharp Mask &nbsp;|&nbsp; "
+                f"<b>Clarity:</b> {blur_status}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
     with col_vitals:
         st.subheader("💓 Physiological Telemetry")

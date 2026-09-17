@@ -36,6 +36,11 @@ class LiveState:
     eye_quality:     float                  = 0.0
     eye_available:   bool                   = True
 
+    # DIP & Video Quality Telemetry
+    blur_score:      float                  = 100.0
+    is_blurry:       bool                   = False
+    dip_active:      bool                   = True
+
     # Frame counter (for throttling heavy models)
     frame_count:     int                    = 0
 
@@ -54,6 +59,9 @@ class LiveState:
                 "fatigue_strain":  self.fatigue_strain,
                 "eye_quality":     self.eye_quality,
                 "eye_available":   self.eye_available,
+                "blur_score":      self.blur_score,
+                "is_blurry":       self.is_blurry,
+                "dip_active":      self.dip_active,
                 "frame_count":     self.frame_count,
             }
 
