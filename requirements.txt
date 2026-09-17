@@ -22,11 +22,14 @@ streamlit>=1.35.0
 opencv-python-headless>=4.8.0,<5.0.0   # pinned <5.0: OpenCV 5 removed Haar cascade XMLs required by DeepFace
 
 # ── pip (batch 2 — after conda) ────────────────────────────────────────
-deepface>=0.0.93
-tf-keras>=2.16.0                     # required: DeepFace VGG-Face backend on TF 2.16+
-mediapipe>=0.10.9,<0.11.0            # pinned: requires Python < 3.13
+hsemotion-onnx>=0.3.1                   # Pretrained EfficientNet FER (ONNX Runtime, ~10ms CPU)
+onnxruntime>=1.18.0
+deepface>=0.0.93                        # Fallback backend
+tf-keras>=2.16.0                        # required: DeepFace VGG-Face backend on TF 2.16+
+mediapipe>=0.10.9,<0.11.0               # pinned: requires Python < 3.13
 streamlit-webrtc>=0.47.0
 aiortc>=1.8.0
+
 
 # ── Voice module (future — uncomment when ready) ───────────────────────
 # speechbrain>=1.0.0

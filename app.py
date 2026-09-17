@@ -162,14 +162,14 @@ class MAITRIVideoProcessor:
         with ls.lock:
             ls.frame_count += 1
 
-        # Non-blocking dispatch to both workers — drop if busy
+        # Non-blocking dispatch to background workers — passes independent copies to prevent HUD race
         try:
-            self._face_queue.put_nowait(bgr)
+            self._face_queue.put_nowait(bgr.copy())
         except queue.Full:
             pass
 
         try:
-            self._eye_queue.put_nowait(bgr)
+            self._eye_queue.put_nowait(bgr.copy())
         except queue.Full:
             pass
 
@@ -183,7 +183,7 @@ def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     snap = ls.snapshot()
     h, w = bgr.shape[:2]
 
-    # Persistent face bounding box (updates when background DeepFace completes)
+    # Persistent face bounding box (updates in background from EfficientNet/MediaPipe worker)
     box = snap.get("face_box")
     if box:
         bx, by = box.get("x", 0), box.get("y", 0)
@@ -192,11 +192,18 @@ def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
             box_color = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
             cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), box_color, 2)
 
-    # Emotion label top-left
+    # Emotion label top-left (with actual confidence and graceful searching state)
     emo   = snap["face_emotion"].upper()
     conf  = snap["face_confidence"] * 100
-    cv2.putText(bgr, f"{emo}  {conf:.0f}%", (12, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 230, 118), 2, cv2.LINE_AA)
+    if box is not None or snap["face_quality"] > 0.10:
+        disp_text = f"{emo}  {conf:.0f}%"
+        disp_color = (0, 230, 118) if emo in ["HAPPY", "NEUTRAL"] else (0, 165, 255)
+    else:
+        disp_text = "SCANNING FACE..."
+        disp_color = (180, 180, 180)
+
+    cv2.putText(bgr, disp_text, (12, 32),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, disp_color, 2, cv2.LINE_AA)
 
     # Eye info bottom-left
     eye_label = f"EAR:{snap['ear']:.2f}  BLINK:{snap['blink_rate']:.0f}/min  {snap['fatigue_label']}"
@@ -204,11 +211,12 @@ def _draw_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 1, cv2.LINE_AA)
 
     # DIP telemetry top-right
-    dip_status = "BLUR GATED" if snap["is_blurry"] else "DIP: CLAHE+GAMMA"
+    dip_status = "BLUR GATED" if snap["is_blurry"] else "DIP: ENET-B2 + CLAHE"
     dip_color  = (0, 165, 255) if snap["is_blurry"] else (0, 230, 118)
-    cv2.putText(bgr, f"{dip_status}  #{snap['frame_count']}", (w - 240, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, dip_color, 1, cv2.LINE_AA)
+    cv2.putText(bgr, f"{dip_status}  #{snap['frame_count']}", (w - 260, 32),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.50, dip_color, 1, cv2.LINE_AA)
     return bgr
+
 
 
 # ─────────────────────────────────────────────────────────────────────────
