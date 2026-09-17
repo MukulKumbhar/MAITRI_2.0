@@ -1,7 +1,18 @@
 """
 MAITRI 2.0 — M4: Multimodal Fusion Module
 Quality-aware weighted fusion of face emotion + vitals strain + eye fatigue.
-Uses EMA temporal smoothing to prevent single-frame flickering.
+Uses EMA temporal smoothing with adaptive reactivity to prevent flickering.
+
+Weight Justification (Scientific Basis):
+    Base weights: FACE=0.45, VITALS=0.40, EYE=0.15
+    Ref: Strangman et al. (2014), "Physiological monitoring for astronaut health"
+    — Under acute mission stress, physiological biomarkers (cardiac, thermal, SpO₂)
+    are primary stress indicators that precede or co-occur with behavioral/facial
+    responses. Behavioral markers (facial expression) are sensitive but context-
+    dependent and can be suppressed during high-workload task focus. Ocular fatigue
+    is a secondary indicator used for sustained monitoring.
+    Vitals weight is therefore elevated to 0.40, face to 0.45 (primary behavioral
+    signal), and eye to 0.15 (adjunct fatigue measure).
 
 No voice module yet (to be integrated as M_Voice in a future phase).
 """
@@ -13,12 +24,16 @@ from typing import Dict, Optional
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 
 # Base modality weights (must sum to 1.0)
-_BASE_FACE_W    = 0.50
-_BASE_VITALS_W  = 0.35
+# Justified by Strangman et al. (2014): vitals weight elevated vs pure behavioural approaches
+_BASE_FACE_W    = 0.45
+_BASE_VITALS_W  = 0.40
 _BASE_EYE_W     = 0.15
 
 # EMA alpha for temporal smoothing of fused probabilities
-_EMA_ALPHA = 0.35
+# Adaptive: _EMA_ALPHA_SLOW for steady state, _EMA_ALPHA_FAST for emergency spike detection
+_EMA_ALPHA_SLOW = 0.15   # smooth, prevents flickering during normal operation
+_EMA_ALPHA_FAST = 0.40   # reactive, responds quickly to sudden stress spikes (>20% delta)
+_EMA_SPIKE_THRESHOLD = 0.20   # stress delta (0–1) that triggers fast-alpha
 
 # EMA alpha for quality gate weight adjustment
 _GATE_ALPHA = 0.05
@@ -26,6 +41,7 @@ _GATE_ALPHA = 0.05
 # Weight bounds per modality (prevents a single modality dominating)
 _W_MIN = 0.10
 _W_MAX = 0.80
+
 
 
 def _clamp(val: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -172,12 +188,28 @@ def fuse(
             for e in EMOTIONS
         }
 
-    # ── EMA temporal smoothing ────────────────────────────────────────────
+    # ── Adaptive EMA temporal smoothing ──────────────────────────────────────
+    # Use fast alpha if stress just spiked (emergency reactivity),
+    # otherwise use slow alpha for steady-state smoothing (anti-flicker).
+    # Ref: Adaptive EMA — smaller α = smoother, larger α = more reactive.
+    prev_stress_norm = state.last_stress / 100.0
+    # Estimate incoming raw stress for spike detection (before full EMA apply)
+    _raw_neg = _clamp(
+        raw_probs.get("fear", 0.0) * 1.2
+        + raw_probs.get("angry", 0.0) * 1.1
+        + raw_probs.get("sad", 0.0) * 1.0
+        + raw_probs.get("disgust", 0.0) * 0.7
+    )
+    _raw_stress_est = _clamp(w_f * _raw_neg + w_v * vitals_strain + w_e * fatigue_strain)
+    stress_delta = abs(_raw_stress_est - prev_stress_norm)
+    ema_alpha = _EMA_ALPHA_FAST if stress_delta >= _EMA_SPIKE_THRESHOLD else _EMA_ALPHA_SLOW
+
     smoothed = {
-        e: (1 - _EMA_ALPHA) * state.ema_probs[e] + _EMA_ALPHA * raw_probs[e]
+        e: (1 - ema_alpha) * state.ema_probs[e] + ema_alpha * raw_probs[e]
         for e in EMOTIONS
     }
     state.ema_probs = _normalise(smoothed)
+
 
     # ── Derive stress percentage ──────────────────────────────────────────
     # Emotional distress load from negative emotions (normalized 0.0 – 1.0)

@@ -47,13 +47,26 @@ _BLINK_LOW_THRESH  = 8     # hyperfocus / fatigue
 # Rolling window for blink rate calculation
 _BLINK_WINDOW_SEC = 60.0
 
+# ── Per-session EAR calibration ───────────────────────────────────────────
+# First N seconds are used to measure each subject's personal baseline EAR.
+# Drowsy threshold = baseline × _EAR_DROWSY_RATIO (relative, not absolute).
+_CALIBRATION_SEC    = 30.0   # duration of baseline measurement window
+_EAR_DROWSY_RATIO   = 0.80   # drowsy if EAR < baseline × 0.80
+_EAR_BLINK_RATIO    = 0.95   # blink if EAR < baseline × 0.95
+_EAR_FLOOR          = 0.18   # hard floor — protects users with naturally narrow eyes
+
 
 @dataclass
 class EyeSessionState:
     """Persists across Streamlit reruns via st.session_state['eye_state']."""
-    blink_timestamps: List[float] = field(default_factory=list)
-    prev_ear:         float = 0.30
-    in_blink:         bool  = False
+    blink_timestamps:    List[float] = field(default_factory=list)
+    prev_ear:            float = 0.30
+    in_blink:            bool  = False
+    # ── Per-session calibration ──────────────────────────────────────────
+    calibration_samples: List[float] = field(default_factory=list)
+    baseline_ear:        float = 0.0      # 0.0 = not yet calibrated
+    is_calibrated:       bool  = False
+    session_start_time:  float = field(default_factory=time.time)
 
 
 @dataclass
@@ -168,15 +181,36 @@ def analyze_eyes(
     right_ear = _ear_from_landmarks(lm, _RIGHT_EYE, w, h)
     ear = (left_ear + right_ear) / 2.0
 
-    # ── Blink detection — rising edge ─────────────────────────────────────
+    # ── Per-session EAR calibration ────────────────────────────────────────
     now = time.time()
+    # For the first _CALIBRATION_SEC seconds, collect baseline EAR samples.
+    # After calibration, use subject-specific relative thresholds.
+    elapsed_session = now - session.session_start_time
+    if not session.is_calibrated:
+        # Only collect samples while eyes appear open (ear > hard floor)
+        if ear > _EAR_FLOOR:
+            session.calibration_samples.append(ear)
+        if elapsed_session >= _CALIBRATION_SEC and len(session.calibration_samples) >= 10:
+            session.baseline_ear   = float(np.mean(session.calibration_samples))
+            session.is_calibrated  = True
+        # During calibration: use global fallback thresholds
+        effective_fatigue_thresh = _EAR_FATIGUE_THRESH
+        effective_blink_thresh   = _EAR_BLINK_THRESH
+        calibrating = True
+    else:
+        # Use relative thresholds anchored to this subject's baseline
+        effective_fatigue_thresh = max(_EAR_FLOOR, session.baseline_ear * _EAR_DROWSY_RATIO)
+        effective_blink_thresh   = session.baseline_ear * _EAR_BLINK_RATIO
+        calibrating = False
+
+    # ── Blink detection — rising edge ─────────────────────────────────────
     new_blink = False
-    if session.prev_ear < _EAR_BLINK_THRESH and ear >= _EAR_BLINK_THRESH:
+    if session.prev_ear < effective_blink_thresh and ear >= effective_blink_thresh:
         if session.in_blink:
             session.blink_timestamps.append(now)
             new_blink = True
         session.in_blink = False
-    elif ear < _EAR_BLINK_THRESH:
+    elif ear < effective_blink_thresh:
         session.in_blink = True
     session.prev_ear = ear
 
@@ -192,7 +226,9 @@ def analyze_eyes(
         blink_rate = 0.0
 
     # ── Fatigue classification ────────────────────────────────────────────
-    if ear < _EAR_FATIGUE_THRESH:
+    if calibrating:
+        label, strain = "Calibrating…", 0.0
+    elif ear < effective_fatigue_thresh:
         label, strain = "Drowsy", 0.80
     elif blink_rate > _BLINK_HIGH_THRESH:
         label, strain = "Stressed Eyes", 0.55
@@ -200,6 +236,7 @@ def analyze_eyes(
         label, strain = "Hyperfocused", 0.40
     else:
         label, strain = "Normal", 0.10
+
 
     return EyeResult(
         ear=round(ear, 3),

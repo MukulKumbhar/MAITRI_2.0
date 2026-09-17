@@ -162,12 +162,33 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         dominant      = result["dominant_emotion"]
         confidence    = float(emotion_probs.get(dominant, 0.0)) / 100.0
 
-        # Quality gating:
-        # Base quality is confidence-derived, but severely penalized if image is blurred
-        if is_blurry:
-            quality = min(1.0, confidence * 1.2) * max(0.15, blur_score / 100.0)
-        else:
-            quality = min(1.0, confidence * 1.2)
+        # ── Multi-factor quality scoring ──────────────────────────────────────
+        # Factor 1: Blur gating (Laplacian-based)
+        blur_penalty = max(0.15, blur_score / 100.0) if is_blurry else 1.0
+
+        # Factor 2: Face area ratio — too small a face region = unreliable inference
+        region = result.get("region")
+        area_penalty = 1.0
+        if region:
+            face_area = region.get("w", 0) * region.get("h", 0)
+            frame_area = small_frame.shape[0] * small_frame.shape[1]
+            area_ratio = face_area / max(frame_area, 1)
+            if area_ratio < 0.03:   # face < 3% of frame = too small/far
+                area_penalty = 0.70
+
+        # Factor 3: Lighting quality — mean brightness of face ROI
+        lighting_penalty = 1.0
+        if region:
+            x, y, fw, fh = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
+            face_roi = small_frame[y:y+fh, x:x+fw]
+            if face_roi.size > 0:
+                mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)))
+                if mean_brightness < 30 or mean_brightness > 220:   # too dark or blown out
+                    lighting_penalty = 0.80
+
+        # Combine: confidence × blur × area × lighting
+        quality = min(1.0, confidence * 1.2) * blur_penalty * area_penalty * lighting_penalty
+
 
         # Rescale detected face region back to original frame coordinates for crisp HUD
         region = result.get("region")
