@@ -39,3 +39,8 @@ wheels/
 *.swo
 *~
 .DS_Store
+
+# Heavy neural network model binaries (local weights)
+models/*.onnx
+models/*.task
+
