@@ -57,8 +57,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── Standard Emotion Color Map (Matches HUD and Charts) ───────────────────
+EMO_COLORS = {
+    "angry": "#e74c3c", "disgust": "#27ae60", "fear": "#9b59b6",
+    "happy": "#f1c40f", "neutral": "#95a5a6", "sad": "#3498db",
+    "surprise": "#e67e22",
+}
+
 # ─────────────────────────────────────────────────────────────────────────
-# SESSION STATE INIT
+# SESSION STATE INIT & THREAD-SAFE REFERENCES
 # ─────────────────────────────────────────────────────────────────────────
 if "live_state"   not in st.session_state:
     st.session_state.live_state   = LiveState()
@@ -67,6 +74,28 @@ if "fusion_state" not in st.session_state:
 if "eye_state"    not in st.session_state:
     from modules.eye_module import EyeSessionState
     st.session_state.eye_state    = EyeSessionState()
+if "voice_detector" not in st.session_state:
+    from modules.voice_module import VoiceDetector
+    _detector = VoiceDetector(st.session_state.live_state)
+    _detector.start()
+    st.session_state.voice_detector = _detector
+
+# Global references safe for background threads (aiortc workers cannot access st.session_state)
+_ACTIVE_LIVE_STATE = st.session_state.live_state
+_ACTIVE_EYE_STATE  = st.session_state.eye_state
+
+# Eagerly pre-warm neural networks on page startup to eliminate the 1.7s initial video freeze
+if "models_warmed" not in st.session_state:
+    try:
+        from modules.face_module import process_unified_frame, _get_onnx_session
+        from modules.voice_module import _get_voice_onnx_session
+        _get_onnx_session()
+        _get_voice_onnx_session()
+        _dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+        process_unified_frame(_dummy, st.session_state.eye_state)
+        st.session_state.models_warmed = True
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────
 # WEBRTC VIDEO PROCESSOR
@@ -154,28 +183,59 @@ class MAITRIVideoProcessor:
         Called for EVERY incoming video frame by streamlit-webrtc.
         Returns immediately — all ML inference runs asynchronously in background worker.
         """
-        bgr = frame.to_ndarray(format="bgr24")
-        ls  = self.live_state
-
-        with ls.lock:
-            ls.frame_count += 1
-
-        # Non-blocking dispatch to unified worker — evict stale frame if full to keep freshest input
         try:
-            self._inference_queue.put_nowait(bgr.copy())
-        except queue.Full:
-            try:
-                self._inference_queue.get_nowait()
-            except queue.Empty:
-                pass
+            bgr = frame.to_ndarray(format="bgr24")
+            ls  = self.live_state
+
+            with ls.lock:
+                ls.frame_count += 1
+
+            # Non-blocking dispatch to unified worker — evict stale frame if full to keep freshest input
             try:
                 self._inference_queue.put_nowait(bgr.copy())
             except queue.Full:
+                try:
+                    self._inference_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._inference_queue.put_nowait(bgr.copy())
+                except queue.Full:
+                    pass
+
+            # Draw sleek aerospace glass HUD using latest cached telemetry
+            try:
+                bgr = _draw_aerospace_hud(bgr, ls)
+            except Exception:
                 pass
 
-        # Draw sleek aerospace glass HUD using latest cached telemetry
-        bgr = _draw_aerospace_hud(bgr, ls)
-        return av.VideoFrame.from_ndarray(bgr, format="bgr24")
+            return av.VideoFrame.from_ndarray(bgr, format="bgr24")
+        except Exception:
+            return frame
+
+
+def _make_video_processor() -> MAITRIVideoProcessor:
+    """
+    Thread-safe factory called by aiortc background worker threads.
+    Uses module-level references because st.session_state is not accessible in worker threads.
+    """
+    global _ACTIVE_LIVE_STATE, _ACTIVE_EYE_STATE
+    ls = _ACTIVE_LIVE_STATE
+    es = _ACTIVE_EYE_STATE
+    if ls is None:
+        try:
+            ls = st.session_state.live_state
+        except Exception:
+            ls = LiveState()
+        _ACTIVE_LIVE_STATE = ls
+    if es is None:
+        try:
+            es = st.session_state.eye_state
+        except Exception:
+            from modules.eye_module import EyeSessionState
+            es = EyeSessionState()
+        _ACTIVE_EYE_STATE = es
+    return MAITRIVideoProcessor(ls, es)
 
 
 def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
@@ -286,7 +346,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
         cv2.putText(bgr, telem_text, (x_telem, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, clarity_col, 1, cv2.LINE_AA)
 
-    # 5. Bottom Banner Content (Left: Eye Tracking, Right: LDSF Mission Status)
+    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Mic & Mission Status)
     fatigue = snap["fatigue_label"]
     fatigue_col = {
         "Normal":        (0, 230, 118),
@@ -296,22 +356,47 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     }.get(fatigue, (180, 180, 180))
 
     eye_text = f"EAR: {snap['ear']:.2f}   BLINK: {snap['blink_rate']:.0f}/min   FATIGUE: {fatigue.upper()}"
-    mission_tag = "MAITRI 2.0 // ACTIVE"
+    # Tactical Real-Time VU Meter directly on the live video stream (30 FPS native, zero Streamlit latency)
+    rms    = snap.get("voice_rms", 0.0)
+    is_spk = snap.get("is_speaking", False)
 
-    (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
-    x_tag = w - tw_tag - 14
+    meter_w = 85
+    meter_h = 10
+    meter_x = w - meter_w - 14
+    meter_y = h - 23
 
-    if 14 + tw_eye + 16 > x_tag:
-        mission_tag = "MAITRI 2.0"
-        (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        x_tag = w - tw_tag - 14
+    # Draw meter background box
+    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (18, 24, 34), -1)
+    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (70, 95, 125), 1)
 
-    cv2.putText(bgr, eye_text, (14, h - 13),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, fatigue_col, 1, cv2.LINE_AA)
-    if 14 + tw_eye + 12 <= x_tag:
-        cv2.putText(bgr, mission_tag, (x_tag, h - 13),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
+    # Dynamic fill calculation: calibrated -45 dB ambient floor to 0 dB peak
+    eff_rms = max(0.001, rms)
+    db_val = max(-50.0, min(0.0, 20.0 * np.log10(eff_rms)))
+    hud_pct = min(1.0, max(0.0, (db_val + 45.0) / 45.0))
+
+    fill_w = int(meter_w * hud_pct)
+    if fill_w > 0:
+        vu_col = (0, 230, 118) if hud_pct < 0.55 else (0, 215, 255) if hud_pct < 0.80 else (50, 50, 255)
+        cv2.rectangle(bgr, (meter_x + 1, meter_y + 1), (meter_x + fill_w, meter_y + meter_h - 1), vu_col, -1)
+
+    # Mic status tag next to the meter
+    if is_spk:
+        v_emo = snap.get("voice_emotion", "neutral").upper()
+        v_conf = snap.get("voice_confidence", 0.0) * 100.0
+        mission_tag = f"MIC: {v_emo} {v_conf:.0f}%"
+        tag_col = (0, 230, 118)
+    else:
+        mission_tag = "MIC [IDLE]"
+        tag_col = (130, 145, 160)
+
+    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+    tag_x = meter_x - tw_tag - 8
+    cv2.putText(bgr, mission_tag, (tag_x, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, tag_col, 1, cv2.LINE_AA)
+
+    (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+    cv2.putText(bgr, eye_text, (14, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, fatigue_col, 1, cv2.LINE_AA)
 
     return bgr
 
@@ -350,9 +435,138 @@ def _render_dip_status(is_playing: bool):
 
 
 @st.fragment(run_every=1.0)
-def _render_eye_panel(is_playing: bool):
+def _render_live_voice_telemetry(is_playing: bool):
     ls_snap = st.session_state.live_state.snapshot()
+    rms_val = float(ls_snap.get("voice_rms", 0.0))
+    is_spk  = bool(ls_snap.get("is_speaking", False))
+    v_emo   = str(ls_snap.get("voice_emotion", "neutral")).lower()
+    v_conf  = float(ls_snap.get("voice_confidence", 0.0))
+    v_probs = dict(ls_snap.get("voice_probs", {}))
+
+    # 1. Instant Voice Emotion Badge (matching face reticle aerospace style)
+    if is_spk:
+        theme_col = EMO_COLORS.get(v_emo, "#2ecc71")
+        st.markdown(
+            f"""
+            <div style="background:{theme_col}18; border:2px solid {theme_col}; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#8b9cb5; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Voice Emotion</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:{theme_col}; margin-top:2px;">🎙️ {v_emo.upper()} ({v_conf*100:.0f}%)</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#13381e; color:#00e676; font-size:0.75rem; font-weight:600; border:1px solid #00e67655; box-shadow:0 0 8px #00e67644;">
+                  🔊 ACTIVE
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif v_conf > 0.0:
+        # User spoke and paused: keep last detected emotion clearly displayed for side-by-side comparison
+        theme_col = EMO_COLORS.get(v_emo, "#95a5a6")
+        st.markdown(
+            f"""
+            <div style="background:{theme_col}12; border:2px solid {theme_col}aa; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#8b9cb5; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Voice Emotion (Last Captured)</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:{theme_col}; margin-top:2px;">🎙️ {v_emo.upper()} ({v_conf*100:.0f}%)</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#8b9cb5; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
+                  🔇 STANDBY (GATE: 0%)
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="background:#161d2b; border:2px solid #2a384c; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#60718b; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Voice Emotion</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:#8b9cb5; margin-top:2px;">🔇 STANDBY (AWAITING SPEECH)</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#78889e; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
+                  GATE: 0%
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 2. Voice Emotion Distribution (7-Class SER)
+    st.markdown("<div style='font-size:0.83rem;font-weight:600;margin-bottom:4px;'>Voice Emotion Distribution (7-Class SER)</div>", unsafe_allow_html=True)
+    sorted_v = sorted(v_probs.items(), key=lambda x: x[1], reverse=True)
+    for emo, prob in sorted_v:
+        pct = round(prob * 100, 1)
+        bar_w = max(pct, 1)
+        bar_color = EMO_COLORS.get(emo, "#888")
+        marker = " ◀" if (v_conf > 0.0 and emo == v_emo) else ""
+        st.markdown(
+            f"<div class='emo-row'>"
+            f"<span class='emo-label'>{emo}</span>"
+            f"<div class='emo-bar-bg'>"
+            f"<div class='emo-bar' style='width:{bar_w}%;background:{bar_color};'></div>"
+            f"</div>"
+            f"<span class='emo-pct'>{pct:.1f}%{marker}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # 3. Live Hardware VU Meter
+    if rms_val > 0.0005:
+        eff_rms = min(1.0, max(0.0001, rms_val))
+        db_val = max(-60.0, min(0.0, 20.0 * np.log10(eff_rms)))
+        pct_val = int(max(2, min(100, ((db_val + 48.0) / 48.0) * 100)))
+    else:
+        db_val = -60.0
+        pct_val = 2
+
+    db_text = f"{db_val:.1f} dB" if db_val > -59.5 else "-∞ dB"
+
+    if is_spk:
+        badge_bg = "#13381e"
+        badge_color = "#00e676"
+        badge_dot = "#00e676"
+        dot_glow = "0 0 8px #00e676"
+        badge_label = "🔊 SPEECH ACTIVE (VAD OPEN)"
+    else:
+        badge_bg = "#161d2b"
+        badge_color = "#8b9cb5"
+        badge_dot = "#57677d"
+        dot_glow = "none"
+        badge_label = "🔇 SILENT / AMBIENT (0% WT)"
+
+    st.progress(
+        pct_val / 100.0,
+        text=f"🎙️ Hardware Input Level: {db_text} ({pct_val}%)"
+    )
+
+    st.markdown(
+        f"""
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px; font-size:0.75rem;">
+          <span style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:12px; background:{badge_bg}; color:{badge_color}; font-weight:600;">
+            <span style="width:7px; height:7px; border-radius:50%; background:{badge_dot}; display:inline-block; box-shadow:{dot_glow};"></span>
+            <span>{badge_label}</span>
+          </span>
+          <span style="color:#60718b; font-family:monospace; font-size:0.75rem;">
+            RMS: {rms_val:.4f} | PipeWire 16kHz
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment(run_every=1.0)
+def _render_eye_panel(is_playing: bool):
     if is_playing:
+        ls_snap = st.session_state.live_state.snapshot()
         e1, e2 = st.columns(2)
         e1.metric("EAR", f"{ls_snap['ear']:.3f}")
         e2.metric("Blink Rate", f"{ls_snap['blink_rate']:.1f} /min")
@@ -361,8 +575,9 @@ def _render_eye_panel(is_playing: bool):
             "Stressed Eyes": "#e67e22", "Hyperfocused": "#f1c40f",
         }.get(ls_snap["fatigue_label"], "#aaa")
         st.markdown(
+            f"<div style='margin-top:6px;'>"
             f"<span class='stress-badge' style='background:{eye_color};'>"
-            f"👁️ {ls_snap['fatigue_label']}</span>",
+            f"👁️ {ls_snap['fatigue_label']}</span></div>",
             unsafe_allow_html=True,
         )
         st.caption(f"Frames processed: {ls_snap['frame_count']}")
@@ -385,29 +600,34 @@ def _render_live_assessment(
     face_quality = ls_snap["face_quality"]  if is_playing else 0.0
     face_emotion = ls_snap["face_emotion"]
 
+    weight_mode = st.session_state.get("fusion_weight_mode_toggle", "🤖 Dynamic Quality-Aware")
+    manual_mode = (weight_mode == "🎛️ Manual Override")
+    manual_face_pct = st.session_state.get("manual_face_split_slider", 60)
+    manual_face_ratio = manual_face_pct / 100.0
+
     fusion = fuse(
-        state          = st.session_state.fusion_state,
-        face_probs     = face_probs,
-        face_quality   = face_quality,
-        vitals_strain  = vitals_strain,
-        fatigue_strain = ls_snap["fatigue_strain"],
-        eye_quality    = ls_snap["eye_quality"] if is_playing else 0.0,
+        state             = st.session_state.fusion_state,
+        face_probs        = face_probs,
+        face_quality      = face_quality,
+        vitals_strain     = vitals_strain,
+        fatigue_strain    = ls_snap["fatigue_strain"],
+        eye_quality       = ls_snap["eye_quality"] if is_playing else 0.0,
+        voice_probs       = ls_snap["voice_probs"],
+        voice_quality     = ls_snap["voice_quality"],
+        is_speaking       = ls_snap["is_speaking"],
+        manual_override   = manual_mode,
+        manual_face_ratio = manual_face_ratio,
     )
 
-    # ── Metrics strip ─────────────────────────────────────────────────────
-    m1, m2, m3, m4 = st.columns(4)
+    # ── Metrics strip (5 Modalities & Stress) ─────────────────────────────
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Face Weight",    f"{fusion.face_weight*100:.0f}%")
-    m2.metric("Vitals Weight",  f"{fusion.vitals_weight*100:.0f}%")
-    m3.metric("Eye Weight",     f"{fusion.eye_weight*100:.0f}%")
-    m4.metric("🎯 Stress Index", f"{fusion.stress_pct:.1f}%")
+    m2.metric("Voice Weight",   f"{fusion.voice_weight*100:.0f}%")
+    m3.metric("Vitals Weight",  f"{fusion.vitals_weight*100:.0f}%")
+    m4.metric("Eye Weight",     f"{fusion.eye_weight*100:.0f}%")
+    m5.metric("🎯 Stress Index", f"{fusion.stress_pct:.1f}%")
 
     emo_col, gauge_col = st.columns([1.2, 1.0], gap="large")
-
-    EMO_COLORS = {
-        "angry": "#e74c3c", "disgust": "#27ae60", "fear": "#9b59b6",
-        "happy": "#f1c40f", "neutral": "#95a5a6", "sad": "#3498db",
-        "surprise": "#e67e22",
-    }
 
     with emo_col:
         st.markdown("**Fused Emotion Distribution**")
@@ -483,29 +703,10 @@ def _render_live_assessment(
                 unsafe_allow_html=True,
             )
 
-    # ── Log button ────────────────────────────────────────────────────────
-    st.markdown("---")
-    log_col, _ = st.columns([1, 3])
-    with log_col:
-        if st.button("💾 Log Reading to Mission Database", use_container_width=True):
-            log_event(
-                face_emotion    = face_emotion,
-                fused_emotion   = fusion.dominant_emotion,
-                voice_state     = "N/A",
-                heart_rate      = float(heart_rate),
-                temperature     = float(skin_temp),
-                spo2            = float(spo2),
-                blink_rate      = ls_snap["blink_rate"],
-                fatigue_label   = ls_snap["fatigue_label"],
-                stress_score    = fusion.stress_pct,
-                stress_level    = alert.stress_level,
-                alert_triggered = alert.alert_label,
-                response_msg    = alert.body,
-            )
-            st.session_state["last_logged_time"] = time.time()
-
-        if time.time() - st.session_state.get("last_logged_time", 0) < 4.0:
-            st.success("✅ Mission telemetry logged to database.")
+    # Cache latest fusion for mission logging
+    st.session_state["latest_fusion"] = fusion
+    st.session_state["latest_alert"] = alert
+    st.session_state["latest_face_emotion"] = face_emotion
 
     if is_playing:
         st.caption("⚡ Real-time Telemetry: Live assessment & support engine updating dynamically (1 Hz).")
@@ -528,43 +729,105 @@ with tab_live:
         )
         st.stop()
 
-    # ── ROW 1: Live Video + Vitals ────────────────────────────────────────
-    col_video, col_vitals = st.columns([1.4, 1.0], gap="medium")
+    # ── ROW 1: Side-by-Side Comparison (Live Video + Voice Telemetry) ────
+    col_webcam, col_voice = st.columns([1.1, 1.0], gap="medium")
 
-    with col_video:
-        st.subheader("📹 Live Astronaut Feed")
+    with col_webcam:
+        st.subheader("📹 Live Astronaut Feed & Face FER")
         st.caption("Background ML pipeline · MediaPipe Eye Tracking (~10 FPS)")
 
         rtc_config = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
-        # ── Capture state refs on MAIN thread before passing to factory ───
-        _live_state = st.session_state.live_state
-        _eye_state  = st.session_state.eye_state
+        # ── Prevent Streamlit fragments from desyncing WebRTC run counters ──
+        if "maitri-live" in st.session_state:
+            _rtc_ctx = st.session_state["maitri-live"]
+            try:
+                from streamlit_webrtc.component import (
+                    get_this_session_info,
+                    get_script_run_count,
+                    ComponentValueSnapshot,
+                )
+                _sinfo = get_this_session_info()
+                if _sinfo:
+                    _rc = get_script_run_count(_sinfo)
+                    if _rc is not None:
+                        if _rtc_ctx._last_rendered_run_count is not None:
+                            _rtc_ctx._last_rendered_run_count = _rc - 1
+                        if getattr(_rtc_ctx, "_component_value_snapshot", None) is not None:
+                            _rtc_ctx._component_value_snapshot = ComponentValueSnapshot(
+                                component_value=_rtc_ctx._component_value_snapshot.component_value,
+                                run_count=_rc - 1,
+                            )
+            except Exception:
+                pass
 
-        def _processor_factory():
-            """Closure — captures state from main thread, safe for worker."""
-            return MAITRIVideoProcessor(_live_state, _eye_state)
+        # Refresh thread-safe references before WebRTC worker initialization
+        _ACTIVE_LIVE_STATE = st.session_state.live_state
+        _ACTIVE_EYE_STATE  = st.session_state.eye_state
 
+        # Video-only WebRTC pipeline (<1ms recv latency, 30 FPS locked, zero audio sync delay)
         ctx = webrtc_streamer(
             key="maitri-live",
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
-            video_processor_factory=_processor_factory,
+            video_processor_factory=_make_video_processor,
             media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
             async_processing=True,
         )
 
         _render_dip_status(ctx.state.playing)
 
+    with col_voice:
+        st.subheader("🎙️ Voice Emotion & Acoustic Telemetry")
+        st.caption("Quantized Wav2Vec2 ONNX (16 kHz) · Hardware Ballistic VU")
+
+        _render_live_voice_telemetry(ctx.state.playing)
+
+        st.markdown("---")
+        # Fusion Weighting Control toggle
+        weight_mode = st.radio(
+            "Fusion Weighting Control",
+            ["🤖 Dynamic Quality-Aware", "🎛️ Manual Override"],
+            horizontal=True,
+            key="fusion_weight_mode_toggle",
+        )
+        if weight_mode == "🎛️ Manual Override":
+            manual_face_pct = st.slider(
+                "Behavioral Split (Face vs Voice)",
+                min_value=0, max_value=100, value=60, step=5,
+                format="%d%% Face",
+                key="manual_face_split_slider",
+                help="Adjust balance between visual facial expressions and vocal acoustics. Default: 60% Face / 40% Voice."
+            )
+            st.caption(f"Manual Ratio: **{manual_face_pct}% Face / {100 - manual_face_pct}% Voice** (VAD silence-gated)")
+        else:
+            st.caption("⚡ **Autonomous Quality-Aware Engine**: Auto-balances 60/40 nominal ratio based on real-time face lighting & microphone VAD.")
+
+        # Microphone Sensitivity & Calibration expander
+        with st.expander("🎛️ Microphone Sensitivity & Calibration", expanded=False):
+            vd = st.session_state.get("voice_detector")
+            current_gain = getattr(vd, "gain", 1.0) if vd else 1.0
+            current_thresh = getattr(vd, "silence_threshold", 0.030) if vd else 0.030
+            new_gain = st.slider("Mic Digital Pre-Gain", 0.5, 3.0, float(current_gain), 0.1, key="mic_gain_slider")
+            new_thresh = st.slider("Silence Gate Threshold", 0.005, 0.080, float(current_thresh), 0.005, format="%.3f", key="mic_thresh_slider")
+            if vd:
+                vd.gain = new_gain
+                vd.silence_threshold = new_thresh
+
+    # ── ROW 2: Biological Telemetry & Eye Tracking ────────────────────────
+    st.markdown("---")
+    st.subheader("💓 Biological Telemetry & Eye Tracking")
+
+    col_vitals, col_eye = st.columns([1.1, 1.0], gap="medium")
     with col_vitals:
-        st.subheader("💓 Physiological Telemetry")
+        st.markdown("**Physiological Sensors**")
         st.caption("Adjust sliders to reflect sensor readings")
 
-        heart_rate = st.slider("❤️  Heart Rate (BPM)",      50,  160, 75)
-        skin_temp  = st.slider("🌡️  Skin Temperature (°C)", 35.0, 40.0, 36.6, step=0.1)
-        spo2       = st.slider("🫁  Blood Oxygen (SpO₂ %)", 85,  100, 98)
+        heart_rate = st.slider("❤️  Heart Rate (BPM)",      50,  160, 75, key="live_hr_slider")
+        skin_temp  = st.slider("🌡️  Skin Temperature (°C)", 35.0, 40.0, 36.6, step=0.1, key="live_temp_slider")
+        spo2       = st.slider("🫁  Blood Oxygen (SpO₂ %)", 85,  100, 98, key="live_spo2_slider")
 
         vitals = compute_vitals_strain(heart_rate, skin_temp, float(spo2))
 
@@ -577,18 +840,21 @@ with tab_live:
             vitals.status, "#aaa"
         )
         st.markdown(
+            f"<div style='margin-top:6px;'>"
             f"<span class='stress-badge' style='background:{vitals_color};'>"
-            f"Vitals: {vitals.status}</span>",
+            f"Vitals: {vitals.status}</span></div>",
             unsafe_allow_html=True,
         )
 
-        st.markdown("---")
-        st.subheader("👁️ Eye Tracking (Live)")
+    with col_eye:
+        st.markdown("**Eye Tracking & Fatigue**")
+        st.caption("MediaPipe 478-Landmark Eye Geometry")
         _render_eye_panel(ctx.state.playing)
 
-    # ── ROW 2 & ROW 3: Live Assessment & Autonomous Psychological Support ──
+    # ── ROW 3: Live Multimodal Stress Assessment & Psychological Support ──
     st.markdown("---")
-    st.subheader("🧠 Live Multimodal Stress Assessment")
+    st.subheader("🧠 Live Multimodal Stress Assessment & Psychological Support")
+
     _render_live_assessment(
         heart_rate=heart_rate,
         skin_temp=skin_temp,
@@ -596,6 +862,40 @@ with tab_live:
         vitals_strain=vitals.vitals_strain,
         is_playing=ctx.state.playing,
     )
+
+    # ── Mission Telemetry Logging Button (outside fragment for 100% stable execution) ──
+    st.markdown("---")
+    log_col, _ = st.columns([1, 3])
+    with log_col:
+        if st.button("💾 Log Reading to Mission Database", width="stretch"):
+            snap_log = st.session_state.live_state.snapshot()
+            latest_f = st.session_state.get("latest_fusion")
+            latest_a = st.session_state.get("latest_alert")
+            face_emo = st.session_state.get("latest_face_emotion", snap_log["face_emotion"])
+            fused_emo = latest_f.dominant_emotion if latest_f else face_emo
+            stress_sc = latest_f.stress_pct if latest_f else 0.0
+            stress_lv = latest_a.stress_level if latest_a else "NORMAL"
+            alert_lbl = latest_a.alert_label if latest_a else "NOMINAL"
+            resp_body = latest_a.body if latest_a else "Telemetry nominal."
+
+            log_event(
+                face_emotion    = face_emo,
+                fused_emotion   = fused_emo,
+                voice_state     = f"{snap_log['voice_emotion'].capitalize()} ({'Speaking' if snap_log['is_speaking'] else 'Silent'})",
+                heart_rate      = float(heart_rate),
+                temperature     = float(skin_temp),
+                spo2            = float(spo2),
+                blink_rate      = snap_log["blink_rate"],
+                fatigue_label   = snap_log["fatigue_label"],
+                stress_score    = stress_sc,
+                stress_level    = stress_lv,
+                alert_triggered = alert_lbl,
+                response_msg    = resp_body,
+            )
+            st.session_state["last_logged_time"] = time.time()
+
+        if time.time() - st.session_state.get("last_logged_time", 0) < 4.0:
+            st.success("✅ Mission telemetry logged to database.")
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 2 — MISSION LOGS
@@ -623,7 +923,7 @@ with tab_logs:
 
         st.markdown("---")
         st.markdown("**Full Telemetry Log**")
-        st.dataframe(log_df, use_container_width=True, height=380)
+        st.dataframe(log_df, width="stretch", height=380)
 
         if "fused_emotion" in log_df.columns:
             st.markdown("**Emotion Distribution**")

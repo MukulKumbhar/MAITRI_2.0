@@ -44,6 +44,18 @@ class LiveState:
     # Persistent face bounding box (last detected — survives frames between DeepFace runs)
     face_box:        Optional[Dict[str, int]] = None
 
+    # Voice
+    voice_emotion:   str                    = "neutral"
+    voice_probs:     Dict[str, float]       = field(default_factory=lambda: {
+        "angry": 0.0, "disgust": 0.0, "fear": 0.0,
+        "happy": 0.0, "neutral": 1.0, "sad": 0.0, "surprise": 0.0
+    })
+    voice_confidence: float                 = 0.0
+    voice_quality:   float                  = 0.0
+    is_speaking:     bool                   = False
+    voice_available: bool                   = False
+    voice_rms:       float                  = 0.0
+
     # Frame counter (for throttling heavy models)
     frame_count:     int                    = 0
 
@@ -51,21 +63,28 @@ class LiveState:
         """Return a plain dict copy — safe to read from main thread."""
         with self.lock:
             return {
-                "face_emotion":    self.face_emotion,
-                "emotion_probs":   dict(self.emotion_probs),
-                "face_confidence": self.face_confidence,
-                "face_quality":    self.face_quality,
-                "face_error":      self.face_error,
-                "ear":             self.ear,
-                "blink_rate":      self.blink_rate,
-                "fatigue_label":   self.fatigue_label,
-                "fatigue_strain":  self.fatigue_strain,
-                "eye_quality":     self.eye_quality,
-                "eye_available":   self.eye_available,
-                "blur_score":      self.blur_score,
-                "is_blurry":       self.is_blurry,
-                "dip_active":      self.dip_active,
-                "face_box":        dict(self.face_box) if self.face_box else None,
-                "frame_count":     self.frame_count,
+                "face_emotion":     self.face_emotion,
+                "emotion_probs":    dict(self.emotion_probs),
+                "face_confidence":  self.face_confidence,
+                "face_quality":     self.face_quality,
+                "face_error":       self.face_error,
+                "ear":              self.ear,
+                "blink_rate":       self.blink_rate,
+                "fatigue_label":    self.fatigue_label,
+                "fatigue_strain":   self.fatigue_strain,
+                "eye_quality":      self.eye_quality,
+                "eye_available":    self.eye_available,
+                "blur_score":       self.blur_score,
+                "is_blurry":        self.is_blurry,
+                "dip_active":       self.dip_active,
+                "face_box":         dict(self.face_box) if self.face_box else None,
+                "voice_emotion":    self.voice_emotion,
+                "voice_probs":      dict(self.voice_probs),
+                "voice_confidence": self.voice_confidence,
+                "voice_quality":    self.voice_quality,
+                "is_speaking":      self.is_speaking,
+                "voice_available":  self.voice_available,
+                "voice_rms":        self.voice_rms,
+                "frame_count":      self.frame_count,
             }
 

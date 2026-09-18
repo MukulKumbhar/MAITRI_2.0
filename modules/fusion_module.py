@@ -1,20 +1,20 @@
 """
 MAITRI 2.0 — M4: Multimodal Fusion Module
-Quality-aware weighted fusion of face emotion + vitals strain + eye fatigue.
+Quality-aware weighted fusion of face emotion + voice emotion + vitals strain + eye fatigue.
 Uses EMA temporal smoothing with adaptive reactivity to prevent flickering.
 
-Weight Justification (Scientific Basis):
-    Base weights: FACE=0.45, VITALS=0.40, EYE=0.15
-    Ref: Strangman et al. (2014), "Physiological monitoring for astronaut health"
-    — Under acute mission stress, physiological biomarkers (cardiac, thermal, SpO₂)
-    are primary stress indicators that precede or co-occur with behavioral/facial
-    responses. Behavioral markers (facial expression) are sensitive but context-
-    dependent and can be suppressed during high-workload task focus. Ocular fatigue
-    is a secondary indicator used for sustained monitoring.
-    Vitals weight is therefore elevated to 0.40, face to 0.45 (primary behavioral
-    signal), and eye to 0.15 (adjunct fatigue measure).
+Modality Structure:
+- Behavioral Channels: Face (visual) + Voice (audio)
+  Initial nominal baseline ratio: 60% Face / 40% Voice.
+- Physiological Channel: Vitals Strain (cardiac, thermal, SpO₂)
+- Ocular Channel: Eye Fatigue & Blink Strain (MediaPipe EAR)
 
-No voice module yet (to be integrated as M_Voice in a future phase).
+Dynamic Quality-Aware & Silence VAD Gating:
+- When astronaut is silent (VAD=0, is_speaking=False), voice weight is strictly 0.0,
+  preventing background cabin/microphone noise from interfering with telemetry.
+- Face carries 100% of the behavioral signal during silence.
+- When speech is detected, weights dynamically balance according to relative signal quality
+  or respect manual slider overrides.
 """
 
 from dataclasses import dataclass, field
@@ -23,25 +23,30 @@ from typing import Dict, Optional
 # 7 standard emotion classes (FER / DeepFace convention)
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 
-# Base modality weights (must sum to 1.0)
-# Justified by Strangman et al. (2014): vitals weight elevated vs pure behavioural approaches
-_BASE_FACE_W    = 0.45
-_BASE_VITALS_W  = 0.40
+# Base modality weights (sum to 1.0)
+# Behavioral share = 0.60 (Face=0.36, Voice=0.24 -> 60/40 ratio)
+# Physiological share = 0.25
+# Ocular share = 0.15
+_BASE_BEHAVIORAL_W = 0.60
+_BASE_FACE_RATIO   = 0.60   # 60% Face of behavioral share
+_BASE_VOICE_RATIO  = 0.40   # 40% Voice of behavioral share
+
+_BASE_FACE_W    = _BASE_BEHAVIORAL_W * _BASE_FACE_RATIO   # 0.36
+_BASE_VOICE_W   = _BASE_BEHAVIORAL_W * _BASE_VOICE_RATIO  # 0.24
+_BASE_VITALS_W  = 0.25
 _BASE_EYE_W     = 0.15
 
 # EMA alpha for temporal smoothing of fused probabilities
-# Adaptive: _EMA_ALPHA_SLOW for steady state, _EMA_ALPHA_FAST for emergency spike detection
-_EMA_ALPHA_SLOW = 0.15   # smooth, prevents flickering during normal operation
+_EMA_ALPHA_SLOW = 0.15   # smooth, anti-flicker during steady state
 _EMA_ALPHA_FAST = 0.40   # reactive, responds quickly to sudden stress spikes (>20% delta)
-_EMA_SPIKE_THRESHOLD = 0.20   # stress delta (0–1) that triggers fast-alpha
+_EMA_SPIKE_THRESHOLD = 0.20
 
 # EMA alpha for quality gate weight adjustment
-_GATE_ALPHA = 0.05
+_GATE_ALPHA = 0.12
 
-# Weight bounds per modality (prevents a single modality dominating)
-_W_MIN = 0.10
-_W_MAX = 0.80
-
+# Weight bounds per modality
+_W_MIN = 0.00
+_W_MAX = 0.90
 
 
 def _clamp(val: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -75,11 +80,12 @@ class FusionState:
     """
     ema_probs:      Dict[str, float] = field(default_factory=_neutral_probs)
     w_face:         float = _BASE_FACE_W
+    w_voice:        float = 0.0     # Starts at 0 until speech is verified
     w_vitals:       float = _BASE_VITALS_W
     w_eye:          float = _BASE_EYE_W
     last_emotion:   str   = "neutral"
     last_stress:    float = 0.0
-    initialized:    bool  = False   # True after first frame processed (for EMA bootstrap)
+    initialized:    bool  = False
 
 
 @dataclass
@@ -87,17 +93,15 @@ class FusionResult:
     fused_probs:       Dict[str, float]  # smoothed 7-class distribution
     dominant_emotion:  str
     face_weight:       float
+    voice_weight:      float
     vitals_weight:     float
     eye_weight:        float
     stress_pct:        float
+    is_speaking:       bool = False
 
 
 def _vitals_to_probs(vitals_strain: float) -> Dict[str, float]:
-    """
-    Map a scalar vitals strain (0–1) to a pseudo-probability distribution
-    over the 7 emotion classes. High strain → more sad/fear/angry signal.
-    """
-    # Low strain → neutral/happy; high strain → sad/fear/angry
+    """Map scalar vitals strain (0–1) to emotion pseudo-probabilities."""
     neutral_p = _clamp(1.0 - vitals_strain)
     stress_p  = _clamp(vitals_strain)
     return {
@@ -112,10 +116,7 @@ def _vitals_to_probs(vitals_strain: float) -> Dict[str, float]:
 
 
 def _eye_to_probs(fatigue_strain: float) -> Dict[str, float]:
-    """
-    Map eye fatigue strain (0–1) to emotion pseudo-probabilities.
-    Fatigue → sad/neutral signal.
-    """
+    """Map eye fatigue strain (0–1) to emotion pseudo-probabilities."""
     neutral_p = _clamp(1.0 - fatigue_strain * 0.8)
     sad_p     = _clamp(fatigue_strain * 0.6)
     return {
@@ -134,62 +135,95 @@ def fuse(
     face_probs:     Optional[Dict[str, float]],
     face_quality:   float,
     vitals_strain:  float,
-    fatigue_strain: float,   # 0=normal, 1=very fatigued
-    eye_quality:    float,   # 1 if eye data available, 0 if not
+    fatigue_strain: float,
+    eye_quality:    float,
+    voice_probs:    Optional[Dict[str, float]] = None,
+    voice_quality:  float = 0.0,
+    is_speaking:    bool = False,
+    manual_override: bool = False,
+    manual_face_ratio: float = 0.60,
 ) -> FusionResult:
     """
-    Run one fusion step. Updates `state` in-place (EMA weights + smoothed probs).
+    Run one multimodal fusion step. Updates `state` in-place.
 
     Args:
-        state:          Persisted EMA state object
-        face_probs:     DeepFace 7-class probability dict (None if no face detected)
-        face_quality:   Confidence of face detection (0–1)
-        vitals_strain:  Composite physiological strain (0–1)
-        fatigue_strain: Eye fatigue level (0–1)
-        eye_quality:    1 if MediaPipe data is available, 0 if not
+        state:             Persisted EMA state object
+        face_probs:        7-class face emotion distribution (or None)
+        face_quality:      Face clarity & confidence score (0–1)
+        vitals_strain:     Composite physiological strain (0–1)
+        fatigue_strain:    Eye fatigue level (0–1)
+        eye_quality:       Eye tracking availability (0 or 1)
+        voice_probs:       7-class voice emotion distribution (or None)
+        voice_quality:     Microphone signal quality (0–1)
+        is_speaking:       True if speech activity detected, False if silence
+        manual_override:   If True, use user slider weights rather than dynamic quality
+        manual_face_ratio: Behavioral ratio allocated to Face (e.g. 0.60 = 60% Face, 40% Voice)
     """
-    # ── Build per-modality probability vectors ────────────────────────────
+    # ── 1. Build per-modality probability vectors ─────────────────────────
     f_probs = _normalise(face_probs) if face_probs else _neutral_probs()
     v_probs = _normalise(_vitals_to_probs(vitals_strain))
     e_probs = _normalise(_eye_to_probs(fatigue_strain))
+    vo_probs = _normalise(voice_probs) if (voice_probs and is_speaking) else _neutral_probs()
 
-    # ── Quality-aware EMA weight update ──────────────────────────────────
-    # If face is unavailable, shift weight toward vitals
-    target_w_face   = _clamp(_BASE_FACE_W   * face_quality, _W_MIN, _W_MAX)
-    target_w_eye    = _clamp(_BASE_EYE_W    * eye_quality,  _W_MIN, _W_MAX)
+    # ── 2. Determine target weights ───────────────────────────────────────
+    if manual_override:
+        # User manual mode: slider specifies Face vs Voice ratio
+        face_ratio = _clamp(manual_face_ratio, 0.0, 1.0)
+        voice_ratio = 1.0 - face_ratio
+
+        if not is_speaking:
+            # Safety silence gating: if astronaut is silent, voice weight drops to 0
+            target_w_face  = _BASE_BEHAVIORAL_W
+            target_w_voice = 0.0
+        else:
+            target_w_face  = _BASE_BEHAVIORAL_W * face_ratio
+            target_w_voice = _BASE_BEHAVIORAL_W * voice_ratio
+
+        target_w_vitals = _BASE_VITALS_W
+        target_w_eye    = _BASE_EYE_W * eye_quality
+    else:
+        # Automatic Dynamic Quality-Aware Mode
+        q_f = _BASE_FACE_RATIO * face_quality
+        q_v = _BASE_VOICE_RATIO * voice_quality if is_speaking else 0.0
+        norm_q = q_f + q_v
+
+        if norm_q > 0:
+            target_w_face  = _BASE_BEHAVIORAL_W * (q_f / norm_q)
+            target_w_voice = _BASE_BEHAVIORAL_W * (q_v / norm_q)
+        else:
+            # Both face and voice absent/silent: no behavioral signal
+            target_w_face  = 0.0
+            target_w_voice = 0.0
+
+        target_w_eye = _BASE_EYE_W * eye_quality
+        target_w_vitals = _BASE_VITALS_W
+
+    # ── 3. Smooth weights via EMA ─────────────────────────────────────────
+    # If not speaking, drop voice weight quickly to 0 to prevent noise leakage
+    gate_alpha_voice = 0.35 if not is_speaking else _GATE_ALPHA
 
     state.w_face   = (1 - _GATE_ALPHA) * state.w_face   + _GATE_ALPHA * target_w_face
+    state.w_voice  = (1 - gate_alpha_voice) * state.w_voice  + gate_alpha_voice * target_w_voice
     state.w_eye    = (1 - _GATE_ALPHA) * state.w_eye    + _GATE_ALPHA * target_w_eye
+    state.w_vitals = (1 - _GATE_ALPHA) * state.w_vitals + _GATE_ALPHA * target_w_vitals
 
-    # Redistribute remaining weight to vitals
-    used = state.w_face + state.w_eye
-    state.w_vitals = _clamp(1.0 - used, _W_MIN, _W_MAX)
-
-    # Renormalise so weights sum to 1
-    total_w = state.w_face + state.w_vitals + state.w_eye
-    w_f = state.w_face   / total_w
-    w_v = state.w_vitals / total_w
-    w_e = state.w_eye    / total_w
-
-    # ── Weighted fusion ───────────────────────────────────────────────────
-    # Quality-weighted fusion across all active modalities
-    if face_probs and face_quality > 0.0:
-        raw_probs = {
-            e: w_f * f_probs[e] + w_v * v_probs[e] + w_e * e_probs[e]
-            for e in EMOTIONS
-        }
+    # Renormalise so weights sum to exactly 1.0
+    total_w = state.w_face + state.w_voice + state.w_vitals + state.w_eye
+    if total_w <= 0:
+        w_f, w_vo, w_v, w_e = _BASE_FACE_W, 0.0, _BASE_VITALS_W, _BASE_EYE_W
     else:
-        # Camera is off or no face detected: infer from vitals & fatigue
-        total_non_face = w_v + w_e if (w_v + w_e) > 0 else 1.0
-        raw_probs = {
-            e: (w_v / total_non_face) * v_probs[e] + (w_e / total_non_face) * e_probs[e]
-            for e in EMOTIONS
-        }
+        w_f  = state.w_face   / total_w
+        w_vo = state.w_voice  / total_w
+        w_v  = state.w_vitals / total_w
+        w_e  = state.w_eye    / total_w
 
-    # ── Adaptive EMA temporal smoothing ──────────────────────────────────────
-    # Use fast alpha if stress just spiked (emergency reactivity),
-    # otherwise use slow alpha for steady-state smoothing (anti-flicker).
-    # Ref: Adaptive EMA — smaller α = smoother, larger α = more reactive.
+    # ── 4. Weighted probability fusion ────────────────────────────────────
+    raw_probs = {
+        e: (w_f * f_probs[e] + w_vo * vo_probs[e] + w_v * v_probs[e] + w_e * e_probs[e])
+        for e in EMOTIONS
+    }
+
+    # ── 5. Adaptive EMA temporal smoothing (anti-flicker) ─────────────────
     prev_stress_norm = state.last_stress / 100.0
     _raw_neg = _clamp(
         raw_probs.get("fear", 0.0) * 1.2
@@ -197,12 +231,13 @@ def fuse(
         + raw_probs.get("sad", 0.0) * 1.0
         + raw_probs.get("disgust", 0.0) * 0.7
     )
-    _raw_stress_est = _clamp(w_f * _raw_neg + w_v * vitals_strain + w_e * fatigue_strain)
+    _raw_stress_est = _clamp(
+        w_f * _raw_neg + w_vo * _raw_neg + w_v * vitals_strain + w_e * fatigue_strain
+    )
     stress_delta = abs(_raw_stress_est - prev_stress_norm)
     ema_alpha = _EMA_ALPHA_FAST if stress_delta >= _EMA_SPIKE_THRESHOLD else _EMA_ALPHA_SLOW
 
     if not state.initialized:
-        # First frame: bootstrap directly from raw without smoothing
         state.ema_probs = _normalise(raw_probs)
         state.initialized = True
     else:
@@ -212,12 +247,7 @@ def fuse(
         }
         state.ema_probs = _normalise(smoothed)
 
-
-
-
-    # ── Derive stress percentage ──────────────────────────────────────────
-    # Emotional distress load from negative emotions (normalized 0.0 – 1.0)
-    # Fear and anger indicate acute acute alarm/distress; sad is depressive/withdrawal; disgust is aversion.
+    # ── 6. Composite stress calculation ───────────────────────────────────
     neg_score = _clamp(
         state.ema_probs.get("fear", 0.0) * 1.2
         + state.ema_probs.get("angry", 0.0) * 1.1
@@ -225,16 +255,12 @@ def fuse(
         + state.ema_probs.get("disgust", 0.0) * 0.7
     )
 
-    # 3-modality quality-weighted composite stress
     composite_stress = (
-        w_f * neg_score
+        (w_f + w_vo) * neg_score
         + w_v * vitals_strain
         + w_e * fatigue_strain
     )
 
-    # Acute single-modality override:
-    # Extreme stressors (severe hypoxia/tachycardia, acute panic/fear, or severe drowsiness)
-    # elevate the stress index even if another modality is currently passive/neutral.
     stress_raw = max(
         composite_stress,
         0.80 * vitals_strain,
@@ -251,8 +277,9 @@ def fuse(
         fused_probs=dict(state.ema_probs),
         dominant_emotion=dominant,
         face_weight=w_f,
+        voice_weight=w_vo,
         vitals_weight=w_v,
         eye_weight=w_e,
         stress_pct=stress_pct,
+        is_speaking=is_speaking,
     )
-
