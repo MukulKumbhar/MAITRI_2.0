@@ -44,6 +44,15 @@ from modules.voice_module import (
     ID_TO_MAITRI,
     _MODEL_PATH,
 )
+from modules.dap_enhancer import (
+    apply_infrasonic_filter,
+    compute_dap_prosody,
+    evaluate_laughter_reflex,
+    compute_prosodic_logit_prior,
+    calibrate_logits,
+    DAPProsody,
+    Z_IDLE_BASELINE,
+)
 from modules.live_state import LiveState
 
 
@@ -365,6 +374,217 @@ class TestVoiceAndFusion(unittest.TestCase):
             self.assertIn(snap["voice_emotion"], EMOTIONS)
         finally:
             detector.stop()
+
+    def test_15_infrasonic_filter_rumble_attenuation_and_vad(self):
+        """
+        DAP Infrasonic Filter:
+        - 1-10 Hz hardware rumble (RMS ~0.099) must drop by >10x (below 0.009).
+        - calculate_audio_quality and predict_voice_emotion must evaluate rumble to is_speaking=False.
+        - Speech formants (e.g. 240 Hz) must retain >99% energy.
+        """
+        t = np.linspace(0, 1.5, 24000, dtype=np.float32)
+        # Mechanical rumble on ALC257: 5 Hz + 3 Hz harmonics
+        rumble = (0.12 * np.sin(2 * np.pi * 5 * t) + 0.05 * np.sin(2 * np.pi * 3 * t)).astype(np.float32)
+        rms_rumble_before = float(np.sqrt(np.mean(rumble ** 2)))
+        self.assertGreater(rms_rumble_before, 0.08)
+
+        # Apply infrasonic filter
+        filt_rumble = apply_infrasonic_filter(rumble, cutoff_hz=75.0, sr=16000)
+        rms_rumble_after = float(np.sqrt(np.mean(filt_rumble ** 2)))
+        self.assertLess(rms_rumble_after, 0.009, f"Rumble RMS {rms_rumble_after:.5f} must drop below 0.009")
+        self.assertGreater(rms_rumble_before / (rms_rumble_after + 1e-9), 10.0, "Filter must provide >10x rumble attenuation")
+
+        # VAD silence gating verification: rumble must NOT trigger speech
+        rms_vad, q_vad, is_spk = calculate_audio_quality(rumble, silence_threshold=0.015)
+        self.assertFalse(is_spk, "VAD must classify hardware rumble as silence")
+        self.assertEqual(q_vad, 0.0)
+
+        dom, probs, conf, qual, is_spk_pred = predict_voice_emotion(rumble, silence_threshold=0.015)
+        self.assertFalse(is_spk_pred, "Inference must be skipped on rumble")
+        self.assertEqual(dom, "neutral")
+
+        # Speech transparency verification: 240 Hz vocal tone
+        speech = (0.15 * np.sin(2 * np.pi * 240 * t)).astype(np.float32)
+        filt_speech = apply_infrasonic_filter(speech, cutoff_hz=75.0, sr=16000)
+        rms_speech_before = float(np.sqrt(np.mean(speech ** 2)))
+        rms_speech_after = float(np.sqrt(np.mean(filt_speech ** 2)))
+        energy_retention = rms_speech_after / rms_speech_before
+        self.assertGreater(energy_retention, 0.99, "Speech formant energy must be preserved (>99%)")
+
+    def test_16_dap_prosody_extraction_and_latency(self):
+        """
+        DAP Prosody:
+        - compute_dap_prosody extracts spectral_centroid, f0_mean, pitch_spread, modulation_depth, r_env.
+        - Execution latency on 48,000 samples (3.0s buffer) must be strictly < 2.5 ms.
+        - Gracefully handles silence, zero arrays, and NaN inputs.
+        """
+        sig_3s = (0.10 * np.random.randn(48000)).astype(np.float32)
+
+        # Warm up
+        _ = compute_dap_prosody(sig_3s, sr=16000)
+
+        # Measure latency over 5 iterations
+        times = []
+        for _ in range(5):
+            t0 = time.time()
+            dap = compute_dap_prosody(sig_3s, sr=16000)
+            times.append((time.time() - t0) * 1000)
+
+        avg_latency = float(np.mean(times))
+        self.assertLess(avg_latency, 2.5, f"DAP prosody latency {avg_latency:.2f} ms exceeds 2.5 ms budget")
+
+        # Metric presence & type verification
+        self.assertIsInstance(dap, DAPProsody)
+        self.assertIn("spectral_centroid", dap)
+        self.assertIn("f0_mean", dap)
+        self.assertIn("pitch_spread", dap)
+        self.assertIn("modulation_depth", dap)
+        self.assertIn("r_env", dap)
+        self.assertGreater(dap.spectral_centroid, 0.0)
+
+        # Robustness: silence and zeros
+        silence = np.zeros(16000, dtype=np.float32)
+        dap_silence = compute_dap_prosody(silence)
+        self.assertEqual(dap_silence.spectral_centroid, 0.0)
+        self.assertEqual(dap_silence.f0_mean, 0.0)
+        self.assertEqual(dap_silence.pitch_spread, 0.0)
+        self.assertEqual(dap_silence.r_env, 0.0)
+
+        # Robustness: NaN and empty
+        nan_arr = np.array([np.nan, np.inf, 0.1, 0.2], dtype=np.float32)
+        dap_nan = compute_dap_prosody(nan_arr)
+        self.assertEqual(dap_nan.spectral_centroid, 0.0)
+
+    def test_17_laughter_reflex_detection_and_separation(self):
+        """
+        Biological Laughter Reflex:
+        - Detects laughter (5 Hz rhythmic bursts, high modulation depth, high spectral centroid).
+        - Correctly discriminates laughter (R_env ~ 0.87) from angry shouting (R_env ~ 0.28) and speech.
+        - predict_voice_emotion immediately outputs dominant='happy', confidence=0.94.
+        - Eliminates the >90% sad misclassification anomaly.
+        """
+        sr = 16000
+        duration = 1.5
+        t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
+
+        # 1. Synthetic laughter: 5 Hz modulation bursts + high harmonics & breath noise
+        env_laugh = np.maximum(0.0, np.sin(2 * np.pi * 5.0 * t)) ** 2
+        carrier_laugh = 0.15 * np.sin(2 * np.pi * 320 * t) + 0.10 * np.sin(2 * np.pi * 1500 * t) + 0.05 * np.random.randn(len(t))
+        sig_laugh = (env_laugh * carrier_laugh).astype(np.float32)
+
+        dap_laugh = compute_dap_prosody(sig_laugh, sr=sr)
+        self.assertGreaterEqual(dap_laugh.r_env, 0.50, "Laughter R_env must be >= 0.50")
+        self.assertGreaterEqual(dap_laugh.modulation_depth, 0.70, "Laughter modulation depth must be >= 0.70")
+        self.assertGreaterEqual(dap_laugh.spectral_centroid, 1400.0, "Laughter centroid must be >= 1400 Hz")
+        self.assertTrue(evaluate_laughter_reflex(dap_laugh), "Laughter reflex must trigger")
+
+        # End-to-end emotion prediction on laughter: MUST be happy, NOT sad!
+        dom, probs, conf, qual, is_spk = predict_voice_emotion(sig_laugh, sampling_rate=sr)
+        self.assertTrue(is_spk)
+        self.assertEqual(dom, "happy", f"Laughter must be classified as 'happy', but was '{dom}'")
+        self.assertAlmostEqual(conf, 0.94, places=2)
+        self.assertAlmostEqual(probs["happy"], 0.94, places=2)
+        self.assertLess(probs["sad"], 0.05, f"Sad probability {probs['sad']:.4f} unexpectedly high for laughter")
+
+        # 2. Angry shouting: continuous loud signal, low modulation depth
+        shout_env = 1.0 + 0.1 * np.sin(2 * np.pi * 1.5 * t)
+        sig_shout = (shout_env * (0.25 * np.sin(2 * np.pi * 220 * t) + 0.15 * np.sin(2 * np.pi * 660 * t))).astype(np.float32)
+        dap_shout = compute_dap_prosody(sig_shout, sr=sr)
+        self.assertFalse(evaluate_laughter_reflex(dap_shout), "Angry shouting must NOT trigger laughter reflex")
+
+        # 3. Conversational speech: moderate modulation, low R_env in 3.8-7.0 Hz band
+        speech_env = 0.6 + 0.3 * np.sin(2 * np.pi * 2.2 * t)
+        sig_speech = (speech_env * 0.15 * np.sin(2 * np.pi * 160 * t)).astype(np.float32)
+        dap_speech = compute_dap_prosody(sig_speech, sr=sr)
+        self.assertFalse(evaluate_laughter_reflex(dap_speech), "Normal speech must NOT trigger laughter reflex")
+
+    def test_18_prosodic_calibration_and_baseline_centering(self):
+        """
+        Prosodic Calibration:
+        - Quantized Wav2Vec2 idle vector has +8.79 logit bias favoring sad (+5.487) over happy (-3.305).
+        - Soft baseline centering (z - 0.60 * z0) reduces the idle bias.
+        - Cheerful prosodic prior boosts happy and dampens sad.
+        - Somber prosodic prior boosts sad on low, flat pitch.
+        """
+        # Baseline vector verification
+        self.assertAlmostEqual(Z_IDLE_BASELINE[5], 5.4871, places=3)   # sad
+        self.assertAlmostEqual(Z_IDLE_BASELINE[4], -3.3049, places=3)  # happy
+        raw_gap = Z_IDLE_BASELINE[5] - Z_IDLE_BASELINE[4]
+        self.assertGreater(raw_gap, 8.5)
+
+        # Calibrated idle logits
+        cal_idle = calibrate_logits(Z_IDLE_BASELINE, dap=None, centering_factor=0.60)
+        cal_gap = cal_idle[5] - cal_idle[4]
+        self.assertAlmostEqual(cal_gap, raw_gap * 0.40, delta=0.05)
+        self.assertLess(cal_gap, 4.0, "Soft centering must substantially compress the unvoiced sad bias")
+
+        # Cheerful voice prosody prior
+        dap_cheerful = DAPProsody(
+            spectral_centroid=2200.0,
+            f0_mean=250.0,
+            pitch_spread=42.0,
+            modulation_depth=0.50,
+            r_env=0.10,
+        )
+        prior_cheerful = compute_prosodic_logit_prior(dap_cheerful)
+        self.assertGreater(prior_cheerful[4], 3.0, "Cheerful prior must boost happy (index 4)")
+        self.assertLess(prior_cheerful[5], 0.0, "Cheerful prior must suppress sad (index 5)")
+
+        # Somber voice prosody prior
+        dap_somber = DAPProsody(
+            spectral_centroid=950.0,
+            f0_mean=110.0,
+            pitch_spread=8.0,
+            modulation_depth=0.20,
+            r_env=0.05,
+        )
+        prior_somber = compute_prosodic_logit_prior(dap_somber)
+        self.assertGreater(prior_somber[5], 1.0, "Somber prior must boost sad (index 5)")
+        self.assertLess(prior_somber[4], 0.0, "Somber prior must suppress happy (index 4)")
+
+    def test_19_active_speech_frame_isolation(self):
+        """
+        Active speech frame isolation:
+        - Speech utterance with 0.8s trailing silence is isolated before ONNX sequence pooling.
+        - Trailing silence does not drag the classification into the unvoiced sad sink state.
+        """
+        sr = 16000
+        t_spk = np.linspace(0, 1.2, int(sr * 1.2), dtype=np.float32)
+        speech = (0.25 * np.sin(2 * np.pi * 280 * t_spk)).astype(np.float32)
+        silence = np.zeros(int(sr * 0.8), dtype=np.float32)
+        combo = np.concatenate([speech, silence])
+
+        dom_spk, probs_spk, conf_spk, _, _ = predict_voice_emotion(speech, sampling_rate=sr)
+        dom_combo, probs_combo, conf_combo, _, _ = predict_voice_emotion(combo, sampling_rate=sr)
+
+        self.assertEqual(dom_spk, dom_combo, "Emotion should remain consistent despite trailing silence")
+        self.assertNotEqual(dom_combo, "sad", "Trailing silence must not drag sequence into sad sink state")
+        self.assertLess(probs_combo["sad"], 0.05)
+
+    def test_20_multimodal_fusion_with_laughter(self):
+        """
+        Multimodal fusion integrates laughter immediately into high-confidence happiness.
+        When face is obscured or low quality, vocal laughter dominates the multimodal state.
+        """
+        face_probs = {e: (1.0 if e == "neutral" else 0.0) for e in EMOTIONS}
+        voice_probs = {e: 0.01 for e in EMOTIONS}
+        voice_probs["happy"] = 0.94
+
+        for _ in range(35):
+            res = fuse(
+                state=self.state,
+                face_probs=face_probs,
+                face_quality=0.10,
+                vitals_strain=0.0,
+                fatigue_strain=0.0,
+                eye_quality=0.0,
+                voice_probs=voice_probs,
+                voice_quality=1.0,
+                is_speaking=True,
+            )
+
+        self.assertEqual(res.dominant_emotion, "happy")
+        self.assertGreater(res.fused_probs["happy"], 0.45)
 
 
 if __name__ == "__main__":

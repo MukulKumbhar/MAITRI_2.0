@@ -21,6 +21,13 @@ import collections
 from typing import Dict, Optional, Tuple, Any
 import numpy as np
 
+from modules.dap_enhancer import (
+    apply_infrasonic_filter,
+    compute_dap_prosody,
+    evaluate_laughter_reflex,
+    calibrate_logits,
+)
+
 # Project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -86,6 +93,7 @@ def calculate_audio_quality(
 ) -> Tuple[float, float, bool]:
     """
     Evaluate audio energy and quality with adjustable sensitivity.
+    Applies infrasonic filtering to eliminate hardware mechanical rumble (ALC257).
     
     Args:
         signal: 1D numpy array of audio samples.
@@ -97,11 +105,12 @@ def calculate_audio_quality(
         quality: Signal quality score (0.0 to 1.0).
         is_speaking: True if RMS exceeds silence threshold.
     """
-    if len(signal) == 0:
+    if signal is None or len(signal) == 0:
         return 0.0, 0.0, False
 
-    # Remove DC bias to isolate true acoustic energy (crucial for Linux ALSA/PipeWire ADCs)
-    sig_centered = signal - np.mean(signal)
+    # Remove infrasonic hardware rumble (1-10 Hz)
+    sig_filt = apply_infrasonic_filter(signal)
+    sig_centered = sig_filt - np.mean(sig_filt)
     gained = sig_centered * gain
     rms = float(np.sqrt(np.mean(gained ** 2)))
 
@@ -125,6 +134,13 @@ def predict_voice_emotion(
     """
     Perform Speech Emotion Recognition on a 1D float32 audio array.
     
+    Enhanced with Digital Audio Processing (DAP):
+    1. Infrasonic high-pass filtering (75 Hz cutoff) to eliminate mechanical rumble.
+    2. DAP prosodic extraction (spectral centroid, pitch, envelope periodicity).
+    3. Laughter reflex bypass (returns happy 0.94 immediately on laughter bursts).
+    4. Active speech frame isolation before sequence pooling.
+    5. Soft baseline centering (z_cal = z - 0.60 * z0) and prosodic logit prior calibration.
+    
     Returns:
         dominant_emotion: str ('happy', 'neutral', 'sad', etc.)
         emotion_probs: Dict[str, float] over the 7 classes summing to 1.0.
@@ -132,12 +148,27 @@ def predict_voice_emotion(
         audio_quality: float (0.0 to 1.0)
         is_speaking: bool
     """
+    if signal is None or len(signal) == 0:
+        return "neutral", dict(_DEFAULT_PROBS), 0.0, 0.0, False
+
+    # Infrasonic filtering to eliminate low-frequency hardware rumble before RMS & inference
+    sig_filt = apply_infrasonic_filter(signal, cutoff_hz=75.0, sr=sampling_rate)
+
     rms, quality, is_speaking = calculate_audio_quality(
-        signal, silence_threshold=silence_threshold, gain=gain
+        sig_filt, silence_threshold=silence_threshold, gain=gain
     )
 
-    if not is_speaking or len(signal) < (sampling_rate // 2):
+    if not is_speaking or len(sig_filt) < (sampling_rate // 2):
         return "neutral", dict(_DEFAULT_PROBS), 0.0, 0.0, False
+
+    # DAP Prosodic Feature Extraction
+    dap = compute_dap_prosody(sig_filt, sr=sampling_rate)
+
+    # Biological Laughter Reflex: immediate bypass matching FACS AU12 smile reflex
+    if evaluate_laughter_reflex(dap):
+        laugh_probs = {e: 0.01 for e in EMOTIONS}
+        laugh_probs["happy"] = 0.94
+        return "happy", laugh_probs, 0.94, quality, True
 
     sess = _get_voice_onnx_session()
     if sess is None:
@@ -145,43 +176,45 @@ def predict_voice_emotion(
 
     try:
         # Center and gain
-        sig_centered = signal - np.mean(signal)
+        sig_centered = sig_filt - np.mean(sig_filt)
         gained = sig_centered * gain
 
         # Active speech isolation: normalize based on active voice frames
-        # to prevent prolonged silence/pauses from flattening vocal dynamic range
-        active_mask = np.abs(gained) >= (silence_threshold * 0.4)
-        active_indices = np.where(active_mask)[0]
-
-        if len(active_indices) >= (sampling_rate // 4):
-            # Include 150ms context padding before and after speech
-            pad = int(sampling_rate * 0.15)
-            first_spk = max(0, active_indices[0] - pad)
-            last_spk = min(len(gained), active_indices[-1] + pad)
-            speech_segment = gained[first_spk:last_spk]
-            if len(speech_segment) >= (sampling_rate // 2):
-                mean_ref = float(np.mean(speech_segment))
-                std_ref  = float(np.std(speech_segment))
-                sig_to_norm = speech_segment
+        # and isolate speech segment to avoid unvoiced sequence pooling contamination
+        frame_size = int(sampling_rate * 0.02)  # 20ms frames (320 samples @ 16kHz)
+        n_frames = len(gained) // frame_size
+        if n_frames >= 5:
+            frames = gained[: n_frames * frame_size].reshape(n_frames, frame_size)
+            frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+            active_frame_idx = np.where(frame_rms >= (silence_threshold * 0.4))[0]
+            if len(active_frame_idx) >= 5:  # at least 100ms speech frames
+                pad_frames = int(0.15 / 0.02)  # 150ms padding in frames
+                first_frm = max(0, active_frame_idx[0] - pad_frames)
+                last_frm = min(n_frames, active_frame_idx[-1] + 1 + pad_frames)
+                speech_segment = gained[first_frm * frame_size : last_frm * frame_size]
+                if len(speech_segment) >= (sampling_rate // 2):
+                    sig_target = speech_segment
+                else:
+                    sig_target = gained
             else:
-                active_samples = gained[active_mask]
-                mean_ref = float(np.mean(active_samples))
-                std_ref  = float(np.std(active_samples))
-                sig_to_norm = gained
+                sig_target = gained
         else:
-            mean_ref = float(np.mean(gained))
-            std_ref  = float(np.std(gained))
-            sig_to_norm = gained
+            sig_target = gained
 
-        sig_norm = (sig_to_norm - mean_ref) / (std_ref + 1e-7)
+        mean_ref = float(np.mean(sig_target))
+        std_ref  = float(np.std(sig_target))
+        sig_norm = (sig_target - mean_ref) / (std_ref + 1e-7)
         tensor_in = sig_norm.astype(np.float32).reshape(1, -1)
 
         input_name = sess.get_inputs()[0].name
-        logits = sess.run(None, {input_name: tensor_in})[0][0]
+        raw_logits = sess.run(None, {input_name: tensor_in})[0][0]
+
+        # Soft baseline centering (z_cal = z - 0.60 * z0) + DAP prosodic logit prior
+        cal_logits = calibrate_logits(raw_logits, dap=dap, centering_factor=0.60)
 
         # Softmax with temperature scaling for calibrated dynamic range
         T = 1.15
-        scaled_logits = logits / T
+        scaled_logits = cal_logits / T
         exp_logits = np.exp(scaled_logits - np.max(scaled_logits))
         probs = exp_logits / (np.sum(exp_logits) + 1e-9)
 
@@ -259,11 +292,12 @@ class VoiceDetector:
         arr = chunk.astype(np.float32).ravel()
         with self._lock:
             self.audio_buffer.extend(arr)
-            # Evaluate energy for VAD hangover tracking
+            # Evaluate energy for VAD hangover tracking (infrasonically filtered)
             if len(arr) > 0:
-                chunk_centered = arr - np.mean(arr)
-                chunk_rms = float(np.sqrt(np.mean((chunk_centered * self.gain) ** 2)))
-                if chunk_rms >= self.silence_threshold:
+                _, _, is_chunk_spk = calculate_audio_quality(
+                    arr, silence_threshold=self.silence_threshold, gain=self.gain
+                )
+                if is_chunk_spk:
                     self._last_speech_time = time.time()
                     self._speech_ended_pending = True
 
@@ -312,9 +346,9 @@ class VoiceDetector:
                 # 1. Fast RMS calculation on latest audio chunk (<0.02ms CPU time)
                 chunk_samples = min(len(signal_copy), int(self.target_rate * 0.2))  # last 200ms
                 latest_chunk = signal_copy[-chunk_samples:]
-                chunk_centered = latest_chunk - np.mean(latest_chunk)
-                gained_chunk = chunk_centered * self.gain
-                raw_rms = float(np.sqrt(np.mean(gained_chunk ** 2)))
+                raw_rms, _, is_instant_spk = calculate_audio_quality(
+                    latest_chunk, silence_threshold=self.silence_threshold, gain=self.gain
+                )
 
                 now = time.time()
                 is_instant_spk = (raw_rms >= self.silence_threshold)
