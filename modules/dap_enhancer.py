@@ -76,18 +76,20 @@ def apply_infrasonic_filter(
     restoring true VAD silence gating while preserving 100% of vocal formants (≥85 Hz).
 
     Args:
-        signal: 1D numpy array of audio samples.
+        signal: 1D or 2D numpy array of audio samples.
         cutoff_hz: Corner frequency in Hz (default 75 Hz).
         sr: Audio sampling rate in Hz (default 16000).
 
     Returns:
         Filtered 1D float32 numpy array.
     """
-    if signal is None or len(signal) < 32:
-        return np.asarray(signal if signal is not None else [], dtype=np.float32)
+    if signal is None:
+        return np.array([], dtype=np.float32)
 
-    sig_f = np.nan_to_num(np.asarray(signal, dtype=np.float32))
+    sig_f = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
     n = len(sig_f)
+    if n < 32:
+        return sig_f
 
     # Reflection padding to eliminate circular convolution boundary wrap-around
     pad_len = min(n, 1024)
@@ -124,17 +126,19 @@ def compute_dap_prosody(
     4. Envelope Autocorrelation Periodicity R_env(τ) in 3.8–7.0 Hz lag window.
 
     Args:
-        signal: 1D audio sample array.
+        signal: 1D or 2D audio sample array.
         sr: Sampling rate (default 16000).
 
     Returns:
         DAPProsody object containing extracted acoustic metrics.
     """
-    if signal is None or len(signal) < 320:
+    if signal is None:
         return DAPProsody()
 
-    sig = np.nan_to_num(np.asarray(signal, dtype=np.float32))
+    sig = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
     n = len(sig)
+    if n < 320:
+        return DAPProsody()
 
     # ─────────────────────────────────────────────────────────────────────────
     # 1. Spectral Centroid
@@ -161,7 +165,7 @@ def compute_dap_prosody(
         # Fast sort-based percentiles (<0.04ms vs 7ms for np.percentile)
         env_sorted = np.sort(env)
         p5 = float(env_sorted[int(len(env) * 0.05)])
-        p95 = float(env_sorted[int(len(env) * 0.95)])
+        p95 = float(env_sorted[min(len(env) - 1, int(len(env) * 0.95))])
         mod_depth = float((p95 - p5) / (p95 + p5 + 1e-6))
 
         # Normalized autocorrelation of mean-subtracted envelope
@@ -174,8 +178,15 @@ def compute_dap_prosody(
             fs_env = sr / hop
             tau_min = int(fs_env / 7.0)
             tau_max = int(fs_env / 3.8)
-            window_corr = corr[tau_min : tau_max + 1]
-            r_env = float(np.max(window_corr)) if len(window_corr) > 0 else 0.0
+            window_corr = corr[tau_min : min(len(corr), tau_max + 1)]
+            if len(window_corr) > 0:
+                pk_w = int(np.argmax(window_corr))
+                # True periodic rhythm requires an interior local peak, preventing
+                # monotonically decaying non-laughing speech blocks from registering false rhythm
+                is_local_pk = (pk_w > 0 and window_corr[pk_w] > window_corr[pk_w - 1])
+                r_env = max(0.0, float(window_corr[pk_w])) if is_local_pk else 0.0
+            else:
+                r_env = 0.0
         else:
             r_env = 0.0
     else:
@@ -209,10 +220,12 @@ def compute_dap_prosody(
             frm = p_frames[idx]
             c = np.correlate(frm, frm, mode="full")[p_win - 1 :]
             cw = c[min_lag:max_lag]
-            if len(cw) == 0:
+            if len(cw) < 3:
                 continue
             pk = int(np.argmax(cw))
-            if c[0] > 1e-6 and (cw[pk] / c[0]) > 0.35:
+            # Require interior local peak to reject monotonically decaying rumble slopes
+            is_local_pk = (0 < pk < len(cw) - 1 and cw[pk] >= cw[pk - 1] and cw[pk] >= cw[pk + 1])
+            if is_local_pk and c[0] > 1e-6 and (cw[pk] / c[0]) > 0.35:
                 f0_list.append(sr / (min_lag + pk))
 
         f0_mean = float(np.mean(f0_list)) if f0_list else 0.0
@@ -234,12 +247,16 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
     """
     Biological laughter reflex detector.
     Laughter produces rhythmic staccato bursts (3.8–7.0 Hz modulation) accompanied
-    by high dynamic contrast and high harmonic/breath spectral brightness.
+    by high dynamic contrast and characteristic periodic acoustic energy.
 
-    Triggers when:
-        R_env(τ) ≥ 0.50 AND modulation_depth ≥ 0.70 AND spectral_centroid ≥ 1400 Hz.
+    Dual-trigger architecture:
+    1. Primary DAP trigger (bright staccato bursts):
+       R_env(τ) ≥ 0.50 AND mod_depth ≥ 0.70 AND centroid ≥ 1400 Hz.
+    2. Voiced vocal laughter trigger (natural vowel bursts "ha-ha", "ho-ho", "he-he"):
+       Human vowel formants naturally place centroid in 450–1400 Hz range.
+       R_env(τ) ≥ 0.60 AND mod_depth ≥ 0.75 AND centroid ≥ 400 Hz (securely rejects rumble < 75 Hz).
 
-    Accurately isolates laughter (R_env ~ 0.90) from angry shouting (R_env ~ 0.19)
+    Accurately isolates laughter (R_env ~ 0.87) from angry shouting (R_env ~ 0.19)
     and conversational speech (R_env ~ 0.10).
     """
     if dap is None:
@@ -263,7 +280,15 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
     elif centroid is None:
         centroid = 0.0
 
-    return bool(r_env >= 0.50 and mod_depth >= 0.70 and centroid >= 1400.0)
+    # 1. Primary DAP trigger: bright / breathy staccato bursts
+    if r_env >= 0.50 and mod_depth >= 0.70 and centroid >= 1400.0:
+        return True
+
+    # 2. Voiced vocal laughter trigger: natural vowel bursts ("ha-ha", "ho-ho", "he-he")
+    if r_env >= 0.60 and mod_depth >= 0.75 and centroid >= 400.0:
+        return True
+
+    return False
 
 
 def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) -> np.ndarray:
@@ -271,9 +296,12 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
     Computes additive logit calibration priors matching model classes:
     [0: angry, 1: neutral, 2: disgust, 3: fear, 4: happy, 5: sad, 6: surprise]
 
-    - Cheerful voice (high pitch spread σ(F0) > 35 Hz and centroid > 1800 Hz):
-      Boosts 'happy' (+3.5 to +5.0) and dampens unvoiced 'sad' sink logit.
-    - Somber voice (voiced speech with flat low pitch σ(F0) < 15 Hz and centroid < 1200 Hz):
+    - Cheerful voice (expressive pitch spread or bright intonation):
+      Boosts 'happy' (+2.0 to +5.0) and dampens unvoiced 'sad' sink logit.
+    - Laughter cadence (rhythmic staccato bursts R_env >= 0.35, mod_depth >= 0.40):
+      Boosts 'happy' (+3.0) and dampens 'sad' (-2.0).
+    - Somber voice (voiced speech with flat low pitch σ(F0) < 15 Hz, centroid < 1200 Hz,
+      and strictly non-rhythmic R_env < 0.25, mod_depth < 0.40):
       Boosts 'sad' (+2.0) and dampens 'happy'.
     """
     prior = np.zeros(7, dtype=np.float32)
@@ -298,17 +326,44 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
     elif f0_mean is None:
         f0_mean = 0.0
 
-    # Cheerful voice: broad pitch variations + bright acoustic centroid
+    r_env = getattr(dap, "r_env", None)
+    if r_env is None and isinstance(dap, dict):
+        r_env = dap.get("r_env", 0.0)
+    elif r_env is None:
+        r_env = 0.0
+
+    mod_depth = getattr(dap, "modulation_depth", None)
+    if mod_depth is None and isinstance(dap, dict):
+        mod_depth = dap.get("modulation_depth", 0.0)
+    elif mod_depth is None:
+        mod_depth = 0.0
+
+    # Laughter/chuckle cadence: rhythmic modulation
+    if r_env >= 0.35 and mod_depth >= 0.40 and centroid >= 350.0:
+        prior[4] += 3.0   # happy
+        prior[5] -= 2.0   # sad
+
+    # Cheerful voice: broad pitch variations and/or bright acoustic centroid
     if pitch_spread > 35.0 and centroid > 1800.0:
         boost = 3.5 + min(2.0, (pitch_spread - 35.0) / 15.0)
         prior[4] += boost   # happy
         prior[5] -= 2.0     # sad
+    elif pitch_spread > 25.0 or (pitch_spread > 20.0 and centroid > 350.0):
+        boost = 2.0 + min(2.0, (pitch_spread - 20.0) / 10.0)
+        prior[4] += boost   # happy
+        prior[5] -= 1.5     # sad
     elif pitch_spread > 30.0 or (pitch_spread > 25.0 and centroid > 1500.0):
         prior[4] += 2.0     # happy
         prior[5] -= 1.0     # sad
 
-    # Somber voice: voiced low-frequency monotone
-    if 60.0 <= f0_mean <= 170.0 and pitch_spread < 15.0 and centroid < 1200.0:
+    # Somber voice: voiced low-frequency monotone, non-rhythmic (no bursts)
+    if (
+        60.0 <= f0_mean <= 170.0
+        and pitch_spread < 15.0
+        and centroid < 1200.0
+        and r_env < 0.25
+        and mod_depth < 0.40
+    ):
         prior[5] += 2.0     # sad
         prior[4] -= 1.5     # happy
 
@@ -342,3 +397,4 @@ def calibrate_logits(
         cal_logits = cal_logits + prior
 
     return cal_logits.astype(np.float32)
+

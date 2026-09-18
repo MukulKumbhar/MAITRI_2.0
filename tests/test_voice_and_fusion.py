@@ -586,6 +586,124 @@ class TestVoiceAndFusion(unittest.TestCase):
         self.assertEqual(res.dominant_emotion, "happy")
         self.assertGreater(res.fused_probs["happy"], 0.45)
 
+    def test_21_robust_2d_audio_handling(self):
+        """
+        2D Audio Array Robustness:
+        - Signals with shape (N, 1) or (1, N) from sounddevice or wav readers
+          must be handled seamlessly without broadcasting or dimension crashes.
+        """
+        x_col = (0.2 * np.sin(2 * np.pi * 220 * np.linspace(0, 1.0, 16000))).reshape(-1, 1).astype(np.float32)
+        x_row = x_col.T
+
+        # Infrasonic filter with 2D column
+        filt_col = apply_infrasonic_filter(x_col)
+        self.assertEqual(filt_col.ndim, 1)
+        self.assertEqual(len(filt_col), 16000)
+
+        # Prosody with 2D column
+        dap_col = compute_dap_prosody(x_col)
+        self.assertIsInstance(dap_col, DAPProsody)
+        self.assertLess(dap_col.spectral_centroid, 1000.0, "Centroid must be in normal speech range, not exploded")
+
+        # Audio quality with 2D row
+        rms, q, is_spk = calculate_audio_quality(x_row)
+        self.assertTrue(is_spk)
+
+        # Emotion prediction with 2D column
+        dom, probs, conf, _, _ = predict_voice_emotion(x_col)
+        self.assertIn(dom, EMOTIONS)
+
+    def test_22_voiced_vocal_laughter_reflex(self):
+        """
+        Voiced Human Laughter Reflex:
+        - Human laughter vowels ("ha-ha", "ho-ho", "he-he") have formant centroids in the
+          500-1200 Hz range (not artificially boosted to >1400 Hz by breath hiss).
+        - Must trigger evaluate_laughter_reflex and predict dominant='happy', confidence=0.94.
+        """
+        sr = 16000
+        t = np.linspace(0, 1.5, int(sr * 1.5), dtype=np.float32)
+        env = np.maximum(0.0, np.sin(2 * np.pi * 5.0 * t)) ** 2
+        # Human vowel formants: F0=200Hz, F1=700Hz, F2=1200Hz
+        vocal_laugh = (0.20 * np.sin(2 * np.pi * 200 * t) + 0.15 * np.sin(2 * np.pi * 700 * t) + 0.10 * np.sin(2 * np.pi * 1200 * t)).astype(np.float32)
+        sig = (env * vocal_laugh).astype(np.float32)
+
+        dap = compute_dap_prosody(sig, sr=sr)
+        self.assertGreaterEqual(dap.r_env, 0.60, "Voiced laughter must have high R_env")
+        self.assertGreaterEqual(dap.modulation_depth, 0.75, "Voiced laughter must have deep modulation")
+        self.assertLess(dap.spectral_centroid, 1400.0, "Centroid is in natural vowel range (<1400 Hz)")
+        self.assertTrue(evaluate_laughter_reflex(dap), "Dual-trigger laughter reflex must fire on voiced laughter")
+
+        dom, probs, conf, qual, is_spk = predict_voice_emotion(sig, sampling_rate=sr)
+        self.assertEqual(dom, "happy", f"Voiced laughter must be 'happy', got '{dom}'")
+        self.assertAlmostEqual(conf, 0.94, places=2)
+        self.assertAlmostEqual(probs["happy"], 0.94, places=2)
+        self.assertLess(probs["sad"], 0.05)
+
+    def test_23_speech_block_monotonic_autocorrelation_rejection(self):
+        """
+        Utterance block + silence must NOT be falsely identified as periodic laughter rhythm.
+        Monotonically decaying autocorrelation must have r_env=0.0.
+        """
+        sr = 16000
+        speech = 0.20 * np.sin(2 * np.pi * 300 * np.linspace(0, 0.8, int(sr * 0.8), dtype=np.float32))
+        sig_block = np.zeros(sr * 2, dtype=np.float32)
+        sig_block[:len(speech)] = speech
+
+        dap = compute_dap_prosody(sig_block, sr=sr)
+        self.assertEqual(dap.r_env, 0.0, "Monotonically decaying envelope correlation must yield r_env=0.0")
+        self.assertFalse(evaluate_laughter_reflex(dap))
+
+    def test_24_infrasonic_rumble_pitch_monotonic_boundary_rejection(self):
+        """
+        Pitch tracking on sub-audible low frequency rumble (10 Hz) must NOT falsely lock
+        onto 400 Hz (min_lag boundary).
+        """
+        t = np.linspace(0, 1.0, 16000, dtype=np.float32)
+        rumble_10hz = (0.25 * np.sin(2 * np.pi * 10 * t)).astype(np.float32)
+        dap = compute_dap_prosody(rumble_10hz, sr=16000)
+        self.assertEqual(dap.f0_mean, 0.0, "Low-frequency rumble must not falsely register as 400 Hz pitch")
+
+    def test_25_short_utterance_preserved_in_rolling_buffer(self):
+        """
+        Short utterance (0.35s) inside 3.0s rolling buffer (2.65s silence) must be detected as speech
+        and properly classified without being diluted into silence.
+        """
+        sr = 16000
+        t_spk = np.linspace(0, 0.35, int(sr * 0.35), dtype=np.float32)
+        speech = (0.20 * np.sin(2 * np.pi * 320 * t_spk)).astype(np.float32)
+
+        buf = np.zeros(sr * 3, dtype=np.float32)
+        buf[int(sr * 1.0) : int(sr * 1.0) + len(speech)] = speech
+
+        # Using VoiceDetector silence_threshold=0.030
+        rms, q, is_spk = calculate_audio_quality(buf, silence_threshold=0.030)
+        self.assertTrue(is_spk, "Short utterance in 3.0s buffer must be recognized as speech")
+
+        dom, probs, conf, qual, is_spk_pred = predict_voice_emotion(buf, silence_threshold=0.030)
+        self.assertTrue(is_spk_pred)
+        self.assertGreater(conf, 0.0)
+        self.assertIn(dom, EMOTIONS)
+
+    def test_26_expressive_cheerful_speech_intonation_boost(self):
+        """
+        Expressive cheerful speech with pitch modulation and natural speech formants
+        must boost happy and eliminate the false unvoiced sad sink state.
+        """
+        sr = 16000
+        t = np.linspace(0, 2.5, int(sr * 2.5), dtype=np.float32)
+        f0 = 250 + 55 * np.sin(2 * np.pi * 3 * t)
+        phase = 2 * np.pi * np.cumsum(f0) / sr
+        cheerful_speech = (0.30 * np.sin(phase) + 0.15 * np.sin(2 * phase) + 0.10 * np.sin(3 * phase)).astype(np.float32)
+
+        dap = compute_dap_prosody(cheerful_speech, sr=sr)
+        prior = compute_prosodic_logit_prior(dap)
+        self.assertGreater(prior[4], 2.0, "Expressive intonation must boost happy logit")
+        self.assertLess(prior[5], 0.0, "Expressive intonation must penalize sad logit")
+
+        dom, probs, conf, _, _ = predict_voice_emotion(cheerful_speech, sampling_rate=sr)
+        self.assertEqual(dom, "happy", f"Expressive cheerful speech must predict 'happy', got '{dom}'")
+        self.assertGreater(probs["happy"], probs["sad"], "Happy probability must exceed sad probability")
+
 
 if __name__ == "__main__":
     unittest.main()

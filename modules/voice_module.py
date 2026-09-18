@@ -96,7 +96,7 @@ def calculate_audio_quality(
     Applies infrasonic filtering to eliminate hardware mechanical rumble (ALC257).
     
     Args:
-        signal: 1D numpy array of audio samples.
+        signal: 1D or 2D numpy array of audio samples.
         silence_threshold: RMS cutoff below which audio is considered silence.
         gain: Pre-amplification factor for quiet microphones.
         
@@ -105,20 +105,36 @@ def calculate_audio_quality(
         quality: Signal quality score (0.0 to 1.0).
         is_speaking: True if RMS exceeds silence threshold.
     """
-    if signal is None or len(signal) == 0:
+    if signal is None:
+        return 0.0, 0.0, False
+    arr = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
+    if len(arr) == 0:
         return 0.0, 0.0, False
 
     # Remove infrasonic hardware rumble (1-10 Hz)
-    sig_filt = apply_infrasonic_filter(signal)
+    sig_filt = apply_infrasonic_filter(arr)
     sig_centered = sig_filt - np.mean(sig_filt)
     gained = sig_centered * gain
     rms = float(np.sqrt(np.mean(gained ** 2)))
 
-    if rms < silence_threshold:
+    # For multi-second buffers, also inspect frame-peak RMS so short utterances
+    # (e.g. 0.3s speech + 2.7s silence) are not diluted into silence
+    frame_sz = 320  # 20ms @ 16kHz
+    if len(gained) >= frame_sz * 10:
+        n_frm = len(gained) // frame_sz
+        frm_rms = np.sqrt(np.mean(gained[: n_frm * frame_sz].reshape(n_frm, frame_sz) ** 2, axis=1))
+        peak_rms = float(np.max(frm_rms)) if len(frm_rms) > 0 else 0.0
+        is_speaking = (rms >= silence_threshold) or (peak_rms >= silence_threshold)
+        effective_rms = max(rms, peak_rms)
+    else:
+        is_speaking = (rms >= silence_threshold)
+        effective_rms = rms
+
+    if not is_speaking:
         return rms, 0.0, False
 
     # Quality based on dynamic range without clipping
-    quality = min(1.0, max(0.2, (rms - silence_threshold) / 0.05))
+    quality = min(1.0, max(0.2, (effective_rms - silence_threshold) / 0.05))
     if np.max(np.abs(gained)) > 0.98:
         quality *= 0.70  # Clipping penalty
 
@@ -132,7 +148,7 @@ def predict_voice_emotion(
     gain: float = 1.0,
 ) -> Tuple[str, Dict[str, float], float, float, bool]:
     """
-    Perform Speech Emotion Recognition on a 1D float32 audio array.
+    Perform Speech Emotion Recognition on a 1D or 2D float32 audio array.
     
     Enhanced with Digital Audio Processing (DAP):
     1. Infrasonic high-pass filtering (75 Hz cutoff) to eliminate mechanical rumble.
@@ -148,20 +164,26 @@ def predict_voice_emotion(
         audio_quality: float (0.0 to 1.0)
         is_speaking: bool
     """
-    if signal is None or len(signal) == 0:
+    if signal is None:
+        return "neutral", dict(_DEFAULT_PROBS), 0.0, 0.0, False
+
+    sig_arr = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
+    if len(sig_arr) == 0:
         return "neutral", dict(_DEFAULT_PROBS), 0.0, 0.0, False
 
     # Infrasonic filtering to eliminate low-frequency hardware rumble before RMS & inference
-    sig_filt = apply_infrasonic_filter(signal, cutoff_hz=75.0, sr=sampling_rate)
+    sig_filt = apply_infrasonic_filter(sig_arr, cutoff_hz=75.0, sr=sampling_rate)
 
     rms, quality, is_speaking = calculate_audio_quality(
         sig_filt, silence_threshold=silence_threshold, gain=gain
     )
 
-    if not is_speaking or len(sig_filt) < (sampling_rate // 2):
+    # Require at least 200ms of audio
+    min_samples = int(sampling_rate * 0.20)
+    if not is_speaking or len(sig_filt) < min_samples:
         return "neutral", dict(_DEFAULT_PROBS), 0.0, 0.0, False
 
-    # DAP Prosodic Feature Extraction
+    # DAP Prosodic Feature Extraction on full filtered signal
     dap = compute_dap_prosody(sig_filt, sr=sampling_rate)
 
     # Biological Laughter Reflex: immediate bypass matching FACS AU12 smile reflex
@@ -192,7 +214,7 @@ def predict_voice_emotion(
                 first_frm = max(0, active_frame_idx[0] - pad_frames)
                 last_frm = min(n_frames, active_frame_idx[-1] + 1 + pad_frames)
                 speech_segment = gained[first_frm * frame_size : last_frm * frame_size]
-                if len(speech_segment) >= (sampling_rate // 2):
+                if len(speech_segment) >= min_samples:
                     sig_target = speech_segment
                 else:
                     sig_target = gained
@@ -200,6 +222,15 @@ def predict_voice_emotion(
                 sig_target = gained
         else:
             sig_target = gained
+
+        # Check laughter reflex and prosody on isolated speech segment
+        if sig_target is not gained:
+            dap_target = compute_dap_prosody(sig_target, sr=sampling_rate)
+            if evaluate_laughter_reflex(dap_target):
+                laugh_probs = {e: 0.01 for e in EMOTIONS}
+                laugh_probs["happy"] = 0.94
+                return "happy", laugh_probs, 0.94, quality, True
+            dap = dap_target
 
         mean_ref = float(np.mean(sig_target))
         std_ref  = float(np.std(sig_target))
