@@ -16,9 +16,13 @@ from typing import List, Optional
 
 import numpy as np
 
-# ── Model path — absolute project root ───────────────────────────────────
+# ── Model path — absolute project root or models/ ────────────────────────
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_MODEL_PATH   = os.path.join(_PROJECT_ROOT, "face_landmarker.task")
+_CANDIDATE_PATHS = [
+    os.path.join(_PROJECT_ROOT, "models", "face_landmarker.task"),
+    os.path.join(_PROJECT_ROOT, "face_landmarker.task"),
+]
+_MODEL_PATH   = next((p for p in _CANDIDATE_PATHS if os.path.isfile(p)), _CANDIDATE_PATHS[1])
 
 # ── Lazy-init state (created on first call, not at import) ───────────────
 _landmarker_lock = threading.Lock()
@@ -119,7 +123,7 @@ def _get_landmarker():
                 num_faces=1,
                 min_face_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
-                output_face_blendshapes=False,
+                output_face_blendshapes=True,
                 output_facial_transformation_matrixes=False,
             )
             _landmarker   = mp_vision.FaceLandmarker.create_from_options(opts)
@@ -129,6 +133,85 @@ def _get_landmarker():
             _mp_available = False
             _mp_err_msg   = str(e)
         return _landmarker
+
+
+def extract_face_blendshapes(result) -> dict:
+    """Extract dict of {blendshape_name: score} from MediaPipe FaceLandmarker result."""
+    if not result or not hasattr(result, "face_blendshapes") or not result.face_blendshapes:
+        return {}
+    blendshapes = result.face_blendshapes[0]
+    return {c.category_name: float(c.score) for c in blendshapes if hasattr(c, "category_name")}
+
+
+
+def process_landmarks_for_eyes(
+    lm, img_w: int, img_h: int, session: EyeSessionState
+) -> EyeResult:
+    """Compute EAR, blink rate, and fatigue classification directly from 478 face landmarks."""
+    left_ear  = _ear_from_landmarks(lm, _LEFT_EYE,  img_w, img_h)
+    right_ear = _ear_from_landmarks(lm, _RIGHT_EYE, img_w, img_h)
+    ear = (left_ear + right_ear) / 2.0
+
+    # ── Per-session EAR calibration ────────────────────────────────────────
+    now = time.time()
+    elapsed_session = now - session.session_start_time
+    if not session.is_calibrated:
+        if ear > _EAR_FLOOR:
+            session.calibration_samples.append(ear)
+        if elapsed_session >= _CALIBRATION_SEC and len(session.calibration_samples) >= 10:
+            session.baseline_ear   = float(np.mean(session.calibration_samples))
+            session.is_calibrated  = True
+        effective_fatigue_thresh = _EAR_FATIGUE_THRESH
+        effective_blink_thresh   = _EAR_BLINK_THRESH
+        calibrating = True
+    else:
+        effective_fatigue_thresh = max(_EAR_FLOOR, session.baseline_ear * _EAR_DROWSY_RATIO)
+        effective_blink_thresh   = session.baseline_ear * _EAR_BLINK_RATIO
+        calibrating = False
+
+    # ── Blink detection — rising edge ─────────────────────────────────────
+    new_blink = False
+    if session.prev_ear < effective_blink_thresh and ear >= effective_blink_thresh:
+        if session.in_blink:
+            session.blink_timestamps.append(now)
+            new_blink = True
+        session.in_blink = False
+    elif ear < effective_blink_thresh:
+        session.in_blink = True
+    session.prev_ear = ear
+
+    # ── Prune old timestamps ──────────────────────────────────────────────
+    cutoff = now - _BLINK_WINDOW_SEC
+    session.blink_timestamps = [t for t in session.blink_timestamps if t > cutoff]
+
+    # ── Blink rate (per minute) ───────────────────────────────────────────
+    if len(session.blink_timestamps) >= 2:
+        elapsed = min(now - session.blink_timestamps[0], _BLINK_WINDOW_SEC)
+        blink_rate = len(session.blink_timestamps) / max(elapsed, 1.0) * 60.0
+    else:
+        blink_rate = 0.0
+
+    # ── Fatigue classification ────────────────────────────────────
+    if calibrating:
+        label, strain = "Calibrating…", 0.0
+    elif ear < effective_fatigue_thresh:
+        label, strain = "Drowsy", 0.80
+    elif blink_rate > _BLINK_HIGH_THRESH:
+        label, strain = "Stressed Eyes", 0.55
+    elif 0 < blink_rate < _BLINK_LOW_THRESH:
+        label, strain = "Hyperfocused", 0.40
+    else:
+        label, strain = "Normal", 0.10
+
+    return EyeResult(
+        ear=round(ear, 3),
+        blink_rate=round(blink_rate, 1),
+        fatigue_label=label,
+        fatigue_strain=strain,
+        eye_quality=1.0,
+        new_blink=new_blink,
+        available=True,
+    )
 
 
 def analyze_eyes(
@@ -156,7 +239,7 @@ def analyze_eyes(
     h, w = img_rgb.shape[:2]
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
 
-    # ── Run landmarker ────────────────────────────────────────────────────
+    # ── Run landmarker ────────────────────────────────────────────────
     try:
         result = landmarker.detect(mp_image)
     except Exception:
@@ -175,75 +258,4 @@ def analyze_eyes(
             new_blink=False, available=True,
         )
 
-    lm = result.face_landmarks[0]  # first face
-
-    left_ear  = _ear_from_landmarks(lm, _LEFT_EYE,  w, h)
-    right_ear = _ear_from_landmarks(lm, _RIGHT_EYE, w, h)
-    ear = (left_ear + right_ear) / 2.0
-
-    # ── Per-session EAR calibration ────────────────────────────────────────
-    now = time.time()
-    # For the first _CALIBRATION_SEC seconds, collect baseline EAR samples.
-    # After calibration, use subject-specific relative thresholds.
-    elapsed_session = now - session.session_start_time
-    if not session.is_calibrated:
-        # Only collect samples while eyes appear open (ear > hard floor)
-        if ear > _EAR_FLOOR:
-            session.calibration_samples.append(ear)
-        if elapsed_session >= _CALIBRATION_SEC and len(session.calibration_samples) >= 10:
-            session.baseline_ear   = float(np.mean(session.calibration_samples))
-            session.is_calibrated  = True
-        # During calibration: use global fallback thresholds
-        effective_fatigue_thresh = _EAR_FATIGUE_THRESH
-        effective_blink_thresh   = _EAR_BLINK_THRESH
-        calibrating = True
-    else:
-        # Use relative thresholds anchored to this subject's baseline
-        effective_fatigue_thresh = max(_EAR_FLOOR, session.baseline_ear * _EAR_DROWSY_RATIO)
-        effective_blink_thresh   = session.baseline_ear * _EAR_BLINK_RATIO
-        calibrating = False
-
-    # ── Blink detection — rising edge ─────────────────────────────────────
-    new_blink = False
-    if session.prev_ear < effective_blink_thresh and ear >= effective_blink_thresh:
-        if session.in_blink:
-            session.blink_timestamps.append(now)
-            new_blink = True
-        session.in_blink = False
-    elif ear < effective_blink_thresh:
-        session.in_blink = True
-    session.prev_ear = ear
-
-    # ── Prune old timestamps ──────────────────────────────────────────────
-    cutoff = now - _BLINK_WINDOW_SEC
-    session.blink_timestamps = [t for t in session.blink_timestamps if t > cutoff]
-
-    # ── Blink rate (per minute) ───────────────────────────────────────────
-    if len(session.blink_timestamps) >= 2:
-        elapsed = min(now - session.blink_timestamps[0], _BLINK_WINDOW_SEC)
-        blink_rate = len(session.blink_timestamps) / max(elapsed, 1.0) * 60.0
-    else:
-        blink_rate = 0.0
-
-    # ── Fatigue classification ────────────────────────────────────────────
-    if calibrating:
-        label, strain = "Calibrating…", 0.0
-    elif ear < effective_fatigue_thresh:
-        label, strain = "Drowsy", 0.80
-    elif blink_rate > _BLINK_HIGH_THRESH:
-        label, strain = "Stressed Eyes", 0.55
-    elif 0 < blink_rate < _BLINK_LOW_THRESH:
-        label, strain = "Hyperfocused", 0.40
-    else:
-        label, strain = "Normal", 0.10
-
-
-    return EyeResult(
-        ear=round(ear, 3),
-        blink_rate=round(blink_rate, 1),
-        fatigue_label=label,
-        fatigue_strain=strain,
-        eye_quality=1.0,
-        new_blink=new_blink,
-        available=True,
-    )
+    return process_landmarks_for_eyes(result.face_landmarks[0], w, h, session)

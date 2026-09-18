@@ -22,7 +22,7 @@ class LiveState:
     face_emotion:    str                    = "neutral"
     emotion_probs:   Dict[str, float]       = field(default_factory=lambda: {
         "angry": 0.0, "disgust": 0.0, "fear": 0.0,
-        "happy": 0.0, "neutral": 100.0, "sad": 0.0, "surprise": 0.0
+        "happy": 0.0, "neutral": 1.0, "sad": 0.0, "surprise": 0.0
     })
     face_confidence: float                  = 0.0
     face_quality:    float                  = 0.0

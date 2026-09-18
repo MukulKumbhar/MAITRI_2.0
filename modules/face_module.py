@@ -1,49 +1,26 @@
 """
 MAITRI 2.0 — M1: Facial Emotion Recognition (FER) Module
 State-of-the-Art Architecture:
-- Pretrained EfficientNet-B2 (7-class) via ONNX Runtime (~10ms CPU inference)
-- Trained on AffectNet (400,000+ real-world images) for maximum expression fidelity
-- MediaPipe FaceLandmarker + OpenCV SSD hybrid face detection
-- Digital Image Processing (DIP) Pipeline:
-    * LAB-space CLAHE (illumination/shadow invariance)
-    * Adaptive Gamma Correction (melanin & low-light compensation)
-    * Spatial Unsharp Masking (motion blur edge recovery)
-    * Landmark-based Affine Face Alignment (head-tilt invariance)
-    * Laplacian Variance Quality Gating
-
-Fallback: DeepFace (VGG-Face / CNN) if ONNX engine is unavailable.
+- MediaPipe FaceLandmarker with FACS blendshapes (AU12 smile, AU6 cheek squint)
+- Pretrained EfficientNet ONNX (~8-12ms CPU inference, AffectNet-trained)
+- Isotropic square face cropping (1:1 aspect ratio, 30% margin padding, no face squashing)
+- Natural, unmutated RGB inference crops (prevents DIP domain shift)
+- Passive DIP quality estimation (Laplacian blur metric + brightness telemetry)
+- Unified single-pass frame execution for both Face and Eye telemetry
 """
 
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from modules.dip_enhancer import (
-    compute_blur_metric,
-    apply_adaptive_gamma,
-    apply_clahe_lab,
-    apply_unsharp_mask,
-    apply_face_alignment,
-    extract_eye_centers_from_landmarks,
-)
+from modules.dip_enhancer import compute_blur_metric
 
-# ── 7 Emotion Classes ──────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
-
-# HSEmotion class index mapping
-_HSEMOTION_MAP_7 = {
-    "Anger":     "angry",
-    "Disgust":   "disgust",
-    "Fear":      "fear",
-    "Happiness": "happy",
-    "Neutral":   "neutral",
-    "Sadness":   "sad",
-    "Surprise":  "surprise",
-}
 
 _EMO_COLORS_BGR = {
     "angry":    (0,   0,   220),
@@ -55,59 +32,143 @@ _EMO_COLORS_BGR = {
     "surprise": (0,   165, 255),
 }
 
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_MODELS_DIR   = os.path.join(_PROJECT_ROOT, "models")
+
 
 @dataclass
 class FaceResult:
     emotion_probs:    Dict[str, float]       # 0–100 scale
     dominant_emotion: str
     face_confidence:  float                  # 0–1
-    face_quality:     float                  # 0–1 (DIP quality-gated)
-    annotated_img:    Optional[np.ndarray]   # BGR with overlay
-    error:            Optional[str]
+    face_quality:     float                  # 0–1 (quality-gated)
+    annotated_img:    Optional[np.ndarray]   # BGR with overlay (or None)
+    error:            Optional[str]          = None
     blur_score:       float                  = 100.0
     is_blurry:        bool                   = False
-    dip_applied:      bool                   = True
-    face_box:         Optional[dict]         = None  # {x, y, w, h} in original frame coords
+    dip_applied:      bool                   = False  # False = natural clean crops (no domain shift)
+    face_box:         Optional[dict]         = None   # {"x": x, "y": y, "w": w, "h": h}
+    smile_score:      float                  = 0.0    # AU12 score (0.0 to 1.0)
+    method:           str                    = "none" # "facs_geometric_smile", "deep_semantic_onnx", etc.
 
 
 def _uniform_probs() -> Dict[str, float]:
-    return {e: 100.0 / len(EMOTIONS) for e in EMOTIONS}
+    val = round(100.0 / len(EMOTIONS), 2)
+    return {e: val for e in EMOTIONS}
 
 
-# ── Lazy-init Singletons ───────────────────────────────────────────────────
-_fer_lock   = threading.Lock()
-_fer_model  = None
-_fer_status = None  # None: not checked, True: ready, False: failed
+# ── Lazy Singletons ────────────────────────────────────────────────────────
+_onnx_lock = threading.Lock()
+_onnx_session = None
+_onnx_model_path = None
+_onnx_img_size = 260
+_onnx_class_map = None
+_onnx_init_attempted = False
 
-_ssd_lock   = threading.Lock()
-_ssd_net    = None
-
-_df_lock      = threading.Lock()
-_DeepFace     = None
+_df_lock = threading.Lock()
+_DeepFace = None
 _df_available = None
-_df_err_msg   = ""
+_df_err_msg = ""
+
+_ssd_lock = threading.Lock()
+_ssd_net = None
 
 
-def _get_fer():
-    """Lazy-load Pretrained EfficientNet-B2 ONNX recognizer (~10ms CPU)."""
-    global _fer_model, _fer_status
-    if _fer_status is not None:
-        return _fer_model
-    with _fer_lock:
-        if _fer_status is not None:
-            return _fer_model
+def _get_onnx_session():
+    """
+    Lazy-load Pretrained EfficientNet ONNX session (~8-12ms CPU inference).
+    Searches local models/ dir first, then ~/.hsemotion/.
+    """
+    global _onnx_session, _onnx_model_path, _onnx_img_size, _onnx_class_map, _onnx_init_attempted
+    if _onnx_init_attempted:
+        return _onnx_session
+
+    with _onnx_lock:
+        if _onnx_init_attempted:
+            return _onnx_session
+        _onnx_init_attempted = True
+
+        candidate_paths = [
+            os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
+            os.path.join(_MODELS_DIR, "enet_b2_7.onnx"),
+            os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
+            os.path.expanduser("~/.hsemotion/enet_b2_7.onnx"),
+        ]
+
+        found_path = None
+        for p in candidate_paths:
+            if os.path.isfile(p):
+                found_path = p
+                break
+
+        if not found_path and os.path.isdir(_MODELS_DIR):
+            for fname in os.listdir(_MODELS_DIR):
+                if fname.endswith(".onnx"):
+                    found_path = os.path.join(_MODELS_DIR, fname)
+                    break
+
+        if not found_path:
+            return None
+
         try:
-            from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
-            _fer_model = HSEmotionRecognizer(model_name="enet_b2_7")
-            _fer_status = True
+            import onnxruntime as ort
+            sess_opts = ort.SessionOptions()
+            sess_opts.intra_op_num_threads = min(4, os.cpu_count() or 4)
+            sess_opts.inter_op_num_threads = 1
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+            session = ort.InferenceSession(found_path, sess_options=sess_opts, providers=["CPUExecutionProvider"])
+            _onnx_session = session
+            _onnx_model_path = found_path
+
+            # Dynamically determine input image size from model input metadata
+            inp_shape = session.get_inputs()[0].shape
+            if len(inp_shape) >= 4 and isinstance(inp_shape[2], int) and inp_shape[2] > 0:
+                _onnx_img_size = inp_shape[2]
+            elif "_b0_" in found_path:
+                _onnx_img_size = 224
+            else:
+                _onnx_img_size = 260
+
+            # Dynamically determine number of classes and mapping
+            out_shape = session.get_outputs()[0].shape
+            num_classes = out_shape[1] if (len(out_shape) >= 2 and isinstance(out_shape[1], int)) else (7 if "_7" in found_path else 8)
+
+            if num_classes == 7:
+                # 7 classes: Anger, Disgust, Fear, Happiness, Neutral, Sadness, Surprise
+                _onnx_class_map = {0: "angry", 1: "disgust", 2: "fear", 3: "happy", 4: "neutral", 5: "sad", 6: "surprise"}
+            else:
+                # 8 classes: Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise
+                _onnx_class_map = {0: "angry", 1: "disgust", 2: "disgust", 3: "fear", 4: "happy", 5: "neutral", 6: "sad", 7: "surprise"}
+
+            print(f"[MAITRI] Loaded EfficientNet ONNX model from {found_path} ({_onnx_img_size}x{_onnx_img_size}, {num_classes} classes)")
+        except Exception as exc:
+            print(f"[MAITRI] ONNX session initialization error ({exc})")
+            _onnx_session = None
+
+    return _onnx_session
+
+
+def _get_deepface():
+    """Lazy singleton — DeepFace fallback if ONNX is unavailable."""
+    global _DeepFace, _df_available, _df_err_msg
+    if _df_available is not None:
+        return _DeepFace
+    with _df_lock:
+        if _df_available is not None:
+            return _DeepFace
+        try:
+            from deepface import DeepFace as _DF
+            _DeepFace = _DF
+            _df_available = True
         except Exception as e:
-            print(f"[MAITRI] HSEmotion ONNX init notice ({e}), will use DeepFace fallback.")
-            _fer_status = False
-    return _fer_model
+            _df_available = False
+            _df_err_msg = str(e)
+    return _DeepFace
 
 
 def _get_ssd_net():
-    """Lazy-load OpenCV SSD ResNet Face Detector."""
+    """Lazy-load OpenCV SSD ResNet Face Detector as secondary fallback."""
     global _ssd_net
     if _ssd_net is not None:
         return _ssd_net
@@ -124,143 +185,259 @@ def _get_ssd_net():
     return _ssd_net
 
 
-def _get_deepface():
-    """Lazy singleton — DeepFace fallback."""
-    global _DeepFace, _df_available, _df_err_msg
-    if _df_available is not None:
-        return _DeepFace
-    with _df_lock:
-        if _df_available is not None:
-            return _DeepFace
+# ── Geometric & Crop Helpers ───────────────────────────────────────────────
+def extract_isotropic_square_face_box(
+    landmarks, frame_w: int, frame_h: int, margin_ratio: float = 0.30
+) -> Tuple[dict, Tuple[int, int, int, int]]:
+    """
+    Computes a centered isotropic (1:1 square) face bounding box from MediaPipe landmarks.
+    Margin ratio: 30% padding to prevent 1:1 aspect ratio squashing and avoid clipping chin/mouth.
+    """
+    if not landmarks:
+        cx, cy = frame_w // 2, frame_h // 2
+        s = max(40, min(frame_w, frame_h) // 3)
+        x1, y1 = max(0, cx - s // 2), max(0, cy - s // 2)
+        x2, y2 = min(frame_w, x1 + s), min(frame_h, y1 + s)
+        return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}, (x1, y1, x2, y2)
+
+    xs = [p.x * frame_w for p in landmarks]
+    ys = [p.y * frame_h for p in landmarks]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    raw_w = max_x - min_x
+    raw_h = max_y - min_y
+
+    # Ensure minimum span so single-point or tiny landmark sets produce a valid crop
+    min_span = max(40.0, min(frame_w, frame_h) * 0.08)
+    base_span = max(raw_w, raw_h)
+    if base_span < min_span:
+        base_span = min_span
+
+    side = min(float(min(frame_w, frame_h)), base_span * (1.0 + margin_ratio))
+
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+
+    half = side / 2.0
+    x1 = int(round(cx - half))
+    y1 = int(round(cy - half))
+    x2 = int(round(cx + half))
+    y2 = int(round(cy + half))
+
+    # Shift box if slightly outside boundaries to maintain square size
+    if x1 < 0:
+        x2 = min(frame_w, x2 - x1)
+        x1 = 0
+    if y1 < 0:
+        y2 = min(frame_h, y2 - y1)
+        y1 = 0
+    if x2 > frame_w:
+        x1 = max(0, x1 - (x2 - frame_w))
+        x2 = frame_w
+    if y2 > frame_h:
+        y1 = max(0, y1 - (y2 - frame_h))
+        y2 = frame_h
+
+    # Enforce strict boundary clamping
+    x1 = max(0, min(x1, frame_w))
+    y1 = max(0, min(y1, frame_h))
+    x2 = max(x1, min(x2, frame_w))
+    y2 = max(y1, min(y2, frame_h))
+
+    w = max(0, x2 - x1)
+    h = max(0, y2 - y1)
+    return {"x": x1, "y": y1, "w": w, "h": h}, (x1, y1, x2, y2)
+
+
+def evaluate_facs_smile(blendshapes_dict: Dict[str, float]) -> Tuple[bool, float, float]:
+    """
+    MediaPipe FACS blendshapes:
+    - AU12: mouthSmileLeft, mouthSmileRight (Lip Corner Puller)
+    - AU6:  cheekSquintLeft, cheekSquintRight (Cheek Raiser - Duchenne marker)
+    Returns: (is_smiling, smile_score, cheek_score)
+    """
+    if not blendshapes_dict:
+        return False, 0.0, 0.0
+
+    mouth_l = blendshapes_dict.get("mouthSmileLeft", 0.0)
+    mouth_r = blendshapes_dict.get("mouthSmileRight", 0.0)
+    cheek_l = blendshapes_dict.get("cheekSquintLeft", 0.0)
+    cheek_r = blendshapes_dict.get("cheekSquintRight", 0.0)
+
+    smile_score = float((mouth_l + mouth_r) / 2.0)
+    cheek_score = float((cheek_l + cheek_r) / 2.0)
+
+    # Active smile: strong AU12 (>= 0.40) or moderate AU12 (>= 0.28) + AU6 cheek squint (>= 0.20)
+    is_smiling = (smile_score >= 0.40) or (smile_score >= 0.28 and cheek_score >= 0.20)
+    return is_smiling, smile_score, cheek_score
+
+
+def fuse_facs_with_deep_emotion(
+    deep_dominant: str,
+    deep_probs: Dict[str, float],
+    deep_conf: float,
+    smile_active: bool,
+    smile_score: float,
+    cheek_score: float,
+) -> Tuple[str, Dict[str, float], float, str]:
+    """
+    Hybrid Geometric + Deep Semantic Emotion Fusion:
+    - If smile AU is active, immediately registers 'happy' with high confidence (<1ms).
+    - Otherwise, utilizes the full 7-class deep emotion distribution.
+    """
+    if smile_active:
+        happy_pct = round(min(98.5, max(85.0, smile_score * 115.0)), 2)
+        rem_pct = 100.0 - happy_pct
+
+        fused_probs = {}
+        sum_other = sum(deep_probs.get(e, 0.0) for e in EMOTIONS if e != "happy")
+        for e in EMOTIONS:
+            if e == "happy":
+                fused_probs[e] = happy_pct
+            else:
+                if sum_other > 0:
+                    fused_probs[e] = round((deep_probs.get(e, 0.0) / sum_other) * rem_pct, 2)
+                else:
+                    fused_probs[e] = round(rem_pct / (len(EMOTIONS) - 1), 2)
+        dominant = "happy"
+        conf = happy_pct / 100.0
+        method = "facs_geometric_smile"
+        return dominant, fused_probs, conf, method
+
+    # Mild smile AU (0.20 <= smile_score < 0.28): gently boost happy probability
+    if smile_score >= 0.20 and deep_probs:
+        boost = (smile_score - 0.20) / 0.20 * 25.0
+        fused_probs = dict(deep_probs)
+        fused_probs["happy"] = fused_probs.get("happy", 0.0) + boost
+        tot = sum(fused_probs.values())
+        if tot > 0:
+            fused_probs = {k: round(v / tot * 100.0, 2) for k, v in fused_probs.items()}
+        dominant = max(fused_probs.items(), key=lambda x: x[1])[0]
+        conf = float(fused_probs[dominant]) / 100.0
+        method = "hybrid_onnx_facs"
+        return dominant, fused_probs, conf, method
+
+    return deep_dominant, deep_probs, deep_conf, "deep_semantic_onnx"
+
+
+def compute_face_quality(
+    confidence: float,
+    blur_score: float,
+    is_blurry: bool,
+    fw: int,
+    fh: int,
+    frame_w: int,
+    frame_h: int,
+    mean_brightness: float,
+) -> float:
+    """Multi-factor passive quality score for fusion weighting."""
+    if confidence <= 0.0:
+        return 0.0
+
+    blur_penalty = max(0.50, min(1.0, blur_score / 60.0)) if is_blurry else 1.0
+    area_ratio = (fw * fh) / max(frame_w * frame_h, 1)
+    area_penalty = 0.85 if area_ratio < 0.02 else 1.0
+    lighting_penalty = 0.85 if (mean_brightness < 20.0 or mean_brightness > 235.0) else 1.0
+
+    base_q = min(1.0, max(0.20, confidence * 1.20))
+    return float(base_q * blur_penalty * area_penalty * lighting_penalty)
+
+
+# ── Deep Semantic Inference ────────────────────────────────────────────────
+def _predict_onnx(face_bgr: np.ndarray) -> Tuple[str, Dict[str, float], float]:
+    """
+    Pretrained EfficientNet ONNX inference on clean, unmutated face crop.
+    ImageNet normalization (NO CLAHE, NO gamma, NO unsharp masking).
+    """
+    session = _get_onnx_session()
+    if session is None or face_bgr is None or face_bgr.size == 0:
+        return "neutral", _uniform_probs(), 0.0
+
+    try:
+        face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(face_rgb, (_onnx_img_size, _onnx_img_size), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        norm = (resized - mean) / std
+        tensor = np.ascontiguousarray(np.expand_dims(np.transpose(norm, (2, 0, 1)), axis=0), dtype=np.float32)
+
+        input_name = session.get_inputs()[0].name
+        raw_scores = session.run(None, {input_name: tensor})[0][0]
+
+        exp_s = np.exp(raw_scores - np.max(raw_scores))
+        probs_raw = exp_s / np.sum(exp_s)
+
+        cmap = _onnx_class_map or {0: "angry", 1: "disgust", 2: "disgust", 3: "fear", 4: "happy", 5: "neutral", 6: "sad", 7: "surprise"}
+        probs_dict = {e: 0.0 for e in EMOTIONS}
+        for idx, p in enumerate(probs_raw):
+            emo = cmap.get(idx, "neutral")
+            probs_dict[emo] = probs_dict.get(emo, 0.0) + float(p) * 100.0
+
+        tot = sum(probs_dict.values())
+        if tot > 0:
+            probs_dict = {k: round(v / tot * 100.0, 2) for k, v in probs_dict.items()}
+
+        dominant = max(probs_dict.items(), key=lambda x: x[1])[0]
+        conf = float(probs_dict[dominant]) / 100.0
+        return dominant, probs_dict, conf
+    except Exception as exc:
+        print(f"[MAITRI] ONNX predict error: {exc}")
+        return "neutral", _uniform_probs(), 0.0
+
+
+def _predict_fallback(face_bgr: np.ndarray) -> Tuple[str, Dict[str, float], float]:
+    """Fallback classifier when ONNX model is unavailable."""
+    DF = _get_deepface()
+    if DF is not None and face_bgr is not None and face_bgr.size > 0:
         try:
-            from deepface import DeepFace as _DF
-            _DeepFace     = _DF
-            _df_available = True
-        except Exception as e:
-            _df_available = False
-            _df_err_msg   = str(e)
-    return _DeepFace
-
-
-def _detect_face_and_landmarks(bgr_frame: np.ndarray):
-    """
-    Detect face in frame. Returns:
-      (box_dict, landmarks, detector_name)
-      box_dict: {'x': x, 'y': y, 'w': w, 'h': h} or None
-      landmarks: MediaPipe landmarks list or None
-    """
-    h, w = bgr_frame.shape[:2]
-
-    # 1. Primary: MediaPipe FaceLandmarker (highest landmark accuracy)
-    try:
-        from modules.eye_module import _get_landmarker
-        lm = _get_landmarker()
-        if lm is not None:
-            import mediapipe as mp
-            img_rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            res = lm.detect(mp_img)
-            if res and res.face_landmarks:
-                landmarks = res.face_landmarks[0]
-                xs = [p.x * w for p in landmarks]
-                ys = [p.y * h for p in landmarks]
-                x1, y1 = max(0, int(min(xs))), max(0, int(min(ys)))
-                x2, y2 = min(w, int(max(xs))), min(h, int(max(ys)))
-                # 15% margin padding
-                pad_w = int((x2 - x1) * 0.15)
-                pad_h = int((y2 - y1) * 0.15)
-                x1 = max(0, x1 - pad_w)
-                y1 = max(0, y1 - pad_h)
-                x2 = min(w, x2 + pad_w)
-                y2 = min(h, y2 + pad_h)
-                box = {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
-                return box, landmarks, "mediapipe"
-    except Exception:
-        pass
-
-    # 2. Secondary: OpenCV ResNet-10 SSD Face Detector
-    try:
-        ssd = _get_ssd_net()
-        if ssd is not None:
-            blob = cv2.dnn.blobFromImage(
-                cv2.resize(bgr_frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0)
+            results = DF.analyze(
+                face_bgr,
+                actions=["emotion"],
+                enforce_detection=False,
+                detector_backend="skip",
+                silent=True,
             )
-            ssd.setInput(blob)
-            detections = ssd.forward()
-            best_conf = 0.0
-            best_box = None
-            for i in range(detections.shape[2]):
-                conf = float(detections[0, 0, i, 2])
-                if conf > 0.40 and conf > best_conf:
-                    best_conf = conf
-                    coords = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    bx1, by1, bx2, by2 = coords.astype(int)
-                    bx1, by1 = max(0, bx1), max(0, by1)
-                    bx2, by2 = min(w, bx2), min(h, by2)
-                    best_box = {"x": bx1, "y": by1, "w": bx2 - bx1, "h": by2 - by1}
-            if best_box is not None:
-                return best_box, None, "ssd"
-    except Exception:
-        pass
+            res = results[0]
+            raw_probs = res["emotion"]
+            dominant = res["dominant_emotion"]
+            conf = float(raw_probs.get(dominant, 0.0)) / 100.0
+            return dominant, raw_probs, conf
+        except Exception:
+            pass
 
-    # 3. Fallback: Center 70% region
-    cx1 = int(w * 0.15)
-    cy1 = int(h * 0.10)
-    cw  = int(w * 0.70)
-    ch  = int(h * 0.80)
-    return {"x": cx1, "y": cy1, "w": cw, "h": ch}, None, "center_crop"
+    return "neutral", _uniform_probs(), 0.20
 
 
-def _draw_overlay(
-    img: np.ndarray,
-    dominant: str,
-    emotion_probs: Dict[str, float],
-    region: Optional[dict],
-    blur_score: float = 100.0,
-    is_blurry: bool = False,
-) -> np.ndarray:
-    """Draw bounding box, emotion label, and DIP diagnostic HUD."""
-    out = img.copy()
-    color = _EMO_COLORS_BGR.get(dominant, (255, 255, 255))
-    if is_blurry:
-        color = (0, 165, 255)  # Amber warning when blurry
-
-    if region:
-        x, y = region.get("x", 0), region.get("y", 0)
-        w, h = region.get("w", 0), region.get("h", 0)
-        if w > 0 and h > 0:
-            cv2.rectangle(out, (x, y), (x + w, y + h), color, 2)
-
-            label = f"{dominant.upper()} {emotion_probs.get(dominant, 0):.1f}%"
-            cv2.putText(out, label, (x, max(y - 12, 22)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
-
-            dip_tag = "MOTION BLUR [GATED]" if is_blurry else f"DIP: CLAHE+GAMMA | BLUR:{blur_score:.0f}"
-            tag_color = (0, 165, 255) if is_blurry else (0, 230, 118)
-            cv2.putText(out, dip_tag, (x, y + h + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, tag_color, 1, cv2.LINE_AA)
-    return out
-
-
-def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
+# ── Unified Pipeline (Face + Eye in Single Background Step) ───────────────
+def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResult, Any]:
     """
-    State-of-the-Art Real-Time Face Emotion Analysis:
-    1. Fast Face Detection via MediaPipe FaceLandmarker / SSD
-    2. Digital Image Processing: LAB-space CLAHE + Adaptive Gamma + Unsharp Mask
-    3. Affine Face Alignment on eye landmarks (normalizes tilt)
-    4. Pretrained EfficientNet-B2 (7-class) inference via ONNX Runtime (~10ms)
-    5. Multi-factor quality gating: blur + face area + lighting
+    Unifies face emotion and eye tracking into a SINGLE pass.
+    Eliminates redundant MediaPipe invocations and C++ XNNPACK thread contention.
     """
+    from modules.eye_module import (
+        EyeResult,
+        _get_landmarker,
+        extract_face_blendshapes,
+        process_landmarks_for_eyes,
+    )
+
     if bgr_frame is None or bgr_frame.size == 0:
-        return FaceResult(
+        default_face = FaceResult(
             emotion_probs=_uniform_probs(), dominant_emotion="neutral",
             face_confidence=0.0, face_quality=0.0,
             annotated_img=bgr_frame, error="Empty frame",
         )
+        default_eye = EyeResult(
+            ear=0.30, blink_rate=0.0, fatigue_label="No frame",
+            fatigue_strain=0.0, eye_quality=0.0, new_blink=False, available=False,
+        )
+        return default_face, default_eye
 
     orig_h, orig_w = bgr_frame.shape[:2]
 
-    # ── Downscale frame for speed if resolution is high (>640w) ───────────
+    # Downscale for speed if resolution is high (>640w)
     target_w = 640
     if orig_w > target_w:
         scale = target_w / float(orig_w)
@@ -271,157 +448,367 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
 
     work_h, work_w = work_frame.shape[:2]
 
-    fer = _get_fer()
-
-    # ── If HSEmotion ONNX is ready, run primary EfficientNet pipeline ───────
-    if fer is not None:
+    landmarker = _get_landmarker()
+    if landmarker is not None:
         try:
-            # 1. Face detection & landmark extraction
-            box, landmarks, detector = _detect_face_and_landmarks(work_frame)
-            fx, fy = box["x"], box["y"]
-            fw, fh = box["w"], box["h"]
+            import mediapipe as mp
+            img_rgb = cv2.cvtColor(work_frame, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            res = landmarker.detect(mp_img)
 
-            # Crop face region
-            face_roi = work_frame[fy:fy+fh, fx:fx+fw]
-            if face_roi.size == 0:
-                face_roi = work_frame
+            if res and res.face_landmarks and len(res.face_landmarks) > 0:
+                landmarks = res.face_landmarks[0]
 
-            # 2. DIP Enhancement on Face ROI
+                # 1. Eye tracking from landmarks
+                eye_res = process_landmarks_for_eyes(landmarks, work_w, work_h, eye_session)
+
+                # 2. FACS AU blendshapes
+                bs_dict = extract_face_blendshapes(res)
+                is_smiling, smile_score, cheek_score = evaluate_facs_smile(bs_dict)
+
+                # 3. Isotropic square face cropping (30% margin)
+                box_dict, (x1, y1, x2, y2) = extract_isotropic_square_face_box(
+                    landmarks, work_w, work_h, margin_ratio=0.30
+                )
+                face_roi = work_frame[y1:y2, x1:x2]
+                if face_roi.size == 0:
+                    face_roi = work_frame
+
+                # 4. Passive DIP quality metrics (no pixel mutation)
+                blur_score = compute_blur_metric(face_roi)
+                is_blurry = blur_score < 60.0
+                mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
+
+                # 5. Deep semantic emotion classification on clean crop
+                onnx_sess = _get_onnx_session()
+                if onnx_sess is not None:
+                    deep_dom, deep_probs, deep_conf = _predict_onnx(face_roi)
+                else:
+                    deep_dom, deep_probs, deep_conf = _predict_fallback(face_roi)
+
+                # 6. Hybrid Geometric + Deep Semantic Fusion
+                dominant, fused_probs, conf, method = fuse_facs_with_deep_emotion(
+                    deep_dom, deep_probs, deep_conf, is_smiling, smile_score, cheek_score
+                )
+
+                # 7. Multi-factor quality score
+                quality = compute_face_quality(
+                    conf, blur_score, is_blurry, box_dict["w"], box_dict["h"],
+                    work_w, work_h, mean_brightness
+                )
+
+                # 8. Rescale bounding box to original frame coords
+                if scale != 1.0:
+                    scaled_box = {
+                        "x": int(box_dict["x"] / scale),
+                        "y": int(box_dict["y"] / scale),
+                        "w": int(box_dict["w"] / scale),
+                        "h": int(box_dict["h"] / scale),
+                    }
+                else:
+                    scaled_box = box_dict
+
+                face_res = FaceResult(
+                    emotion_probs=fused_probs,
+                    dominant_emotion=dominant,
+                    face_confidence=conf,
+                    face_quality=quality,
+                    annotated_img=None,
+                    error=None,
+                    blur_score=blur_score,
+                    is_blurry=is_blurry,
+                    dip_applied=False,
+                    face_box=scaled_box,
+                    smile_score=smile_score,
+                    method=method,
+                )
+                return face_res, eye_res
+        except Exception as exc:
+            print(f"[MAITRI] Unified FaceLandmarker error: {exc}")
+
+    # MediaPipe did not detect landmarks; check SSD detector fallback directly without re-running MediaPipe
+    ssd_res = _detect_ssd_face(work_frame, orig_w, orig_h, scale)
+    if ssd_res is not None:
+        eye_res = EyeResult(
+            ear=0.30, blink_rate=0.0,
+            fatigue_label="Scanning...",
+            fatigue_strain=0.0, eye_quality=0.0,
+            new_blink=False, available=True,
+        )
+        return ssd_res, eye_res
+
+    # No face detected in frame
+    blur_score = compute_blur_metric(work_frame)
+    no_face_res = FaceResult(
+        emotion_probs=_uniform_probs(),
+        dominant_emotion="neutral",
+        face_confidence=0.0,
+        face_quality=0.0,
+        annotated_img=None,
+        error=None,
+        blur_score=blur_score,
+        is_blurry=blur_score < 60.0,
+        dip_applied=False,
+        face_box=None,
+        smile_score=0.0,
+        method="no_face",
+    )
+    eye_res = EyeResult(
+        ear=0.30, blink_rate=0.0,
+        fatigue_label="Scanning...",
+        fatigue_strain=0.0, eye_quality=0.0,
+        new_blink=False, available=True,
+    )
+    return no_face_res, eye_res
+
+
+def _detect_ssd_face(
+    work_frame: np.ndarray, orig_w: int, orig_h: int, scale: float
+) -> Optional[FaceResult]:
+    """Secondary fallback face detection using OpenCV SSD ResNet model."""
+    try:
+        ssd = _get_ssd_net()
+        if ssd is None:
+            return None
+
+        work_h, work_w = work_frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(
+            cv2.resize(work_frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0)
+        )
+        ssd.setInput(blob)
+        detections = ssd.forward()
+        best_conf = 0.0
+        best_box = None
+        for i in range(detections.shape[2]):
+            c = float(detections[0, 0, i, 2])
+            if c > 0.40 and c > best_conf:
+                best_conf = c
+                coords = detections[0, 0, i, 3:7] * np.array([work_w, work_h, work_w, work_h])
+                bx1, by1, bx2, by2 = coords.astype(int)
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(work_w, bx2), min(work_h, by2)
+                best_box = (bx1, by1, bx2, by2)
+
+        if best_box is not None:
+            bx1, by1, bx2, by2 = best_box
+            face_roi = work_frame[by1:by2, bx1:bx2]
             blur_score = compute_blur_metric(face_roi)
             is_blurry = blur_score < 60.0
+            mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
 
-            gamma_roi, _ = apply_adaptive_gamma(face_roi, target_mean=120.0)
-            clahe_roi = apply_clahe_lab(gamma_roi, clip_limit=2.5, tile_grid_size=(8, 8))
-            sharp_roi = apply_unsharp_mask(clahe_roi, sigma=1.0, strength=1.1)
-
-            # 3. Affine Face Alignment if landmarks are available
-            if landmarks is not None:
-                eye_centers = extract_eye_centers_from_landmarks(landmarks, work_w, work_h)
-                if eye_centers:
-                    l_roi = (eye_centers[0][0] - fx, eye_centers[0][1] - fy)
-                    r_roi = (eye_centers[1][0] - fx, eye_centers[1][1] - fy)
-                    aligned_roi = apply_face_alignment(sharp_roi, l_roi, r_roi)
-                else:
-                    aligned_roi = sharp_roi
+            onnx_sess = _get_onnx_session()
+            if onnx_sess is not None:
+                dominant, probs, conf = _predict_onnx(face_roi)
             else:
-                aligned_roi = sharp_roi
+                dominant, probs, conf = _predict_fallback(face_roi)
 
-            # 4. Pretrained EfficientNet-B2 ONNX Emotion Classification
-            roi_rgb = cv2.cvtColor(aligned_roi, cv2.COLOR_BGR2RGB)
-            pred_emo, scores = fer.predict_emotions(roi_rgb, logits=False)
+            scaled_box = {
+                "x": int(bx1 / scale), "y": int(by1 / scale),
+                "w": int((bx2 - bx1) / scale), "h": int((by2 - by1) / scale),
+            } if scale != 1.0 else {"x": bx1, "y": by1, "w": bx2 - bx1, "h": by2 - by1}
 
-            dominant = _HSEMOTION_MAP_7.get(pred_emo, pred_emo.lower())
-            emotion_probs = {
-                _HSEMOTION_MAP_7.get(fer.idx_to_class[i], fer.idx_to_class[i].lower()): round(float(scores[i]) * 100.0, 2)
-                for i in range(len(scores))
-            }
-            confidence = float(emotion_probs[dominant]) / 100.0
-
-            # 5. Multi-factor Quality Scoring
-            blur_penalty = max(0.60, min(1.0, blur_score / 60.0)) if is_blurry else 1.0
-            area_ratio = (fw * fh) / max(work_w * work_h, 1)
-            area_penalty = 0.85 if area_ratio < 0.02 else 1.0
-
-            mean_brightness = float(np.mean(cv2.cvtColor(aligned_roi, cv2.COLOR_BGR2GRAY)))
-            lighting_penalty = 0.85 if (mean_brightness < 20 or mean_brightness > 235) else 1.0
-            det_factor = 0.60 if detector == "center_crop" else 1.0
-
-            # Base quality is anchored to confidence with high floor for confirmed detections
-            base_q = max(0.60, min(1.0, confidence * 1.20)) if detector != "center_crop" else max(0.30, confidence * 0.70)
-            quality = base_q * blur_penalty * area_penalty * lighting_penalty * det_factor
-
-
-
-            # 6. Rescale face box to original frame coordinates for crisp HUD
-            if scale != 1.0 and detector != "center_crop":
-                scaled_box = {
-                    "x": int(fx / scale),
-                    "y": int(fy / scale),
-                    "w": int(fw / scale),
-                    "h": int(fh / scale),
-                }
-            elif detector != "center_crop":
-                scaled_box = box
-            else:
-                scaled_box = None
-
-            annotated = _draw_overlay(
-                bgr_frame, dominant, emotion_probs, scaled_box,
-                blur_score=blur_score, is_blurry=is_blurry
+            quality = compute_face_quality(
+                conf, blur_score, is_blurry, scaled_box["w"], scaled_box["h"],
+                orig_w, orig_h, mean_brightness
             )
 
             return FaceResult(
-                emotion_probs=emotion_probs,
+                emotion_probs=probs,
                 dominant_emotion=dominant,
-                face_confidence=confidence,
+                face_confidence=conf,
                 face_quality=quality,
-                annotated_img=annotated,
+                annotated_img=None,
                 error=None,
                 blur_score=blur_score,
                 is_blurry=is_blurry,
-                dip_applied=True,
+                dip_applied=False,
                 face_box=scaled_box,
+                smile_score=0.0,
+                method="ssd_detection",
             )
-        except Exception as exc:
-            print(f"[MAITRI] HSEmotion inference error ({exc}), switching to DeepFace.")
-
-    # ── DeepFace Fallback Pipeline ─────────────────────────────────────────
-    DF = _get_deepface()
-    if DF is None:
-        return FaceResult(
-            emotion_probs=_uniform_probs(), dominant_emotion="neutral",
-            face_confidence=0.0, face_quality=0.0,
-            annotated_img=bgr_frame,
-            error=f"All face emotion models unavailable: {_df_err_msg}",
-        )
-
-    try:
-        results = DF.analyze(
-            work_frame,
-            actions=["emotion"],
-            enforce_detection=False,
-            detector_backend="opencv",
-            silent=True,
-        )
-        result = results[0]
-        raw_probs = result["emotion"]
-        dominant = result["dominant_emotion"]
-        confidence = float(raw_probs.get(dominant, 0.0)) / 100.0
-
-        region = result.get("region")
-        scaled_box = None
-        if region and region.get("w", 0) > 20 and region.get("h", 0) > 20:
-            if scale != 1.0:
-                scaled_box = {
-                    "x": int(region["x"] / scale),
-                    "y": int(region["y"] / scale),
-                    "w": int(region["w"] / scale),
-                    "h": int(region["h"] / scale),
-                }
-            else:
-                scaled_box = region
-
-        blur_score = compute_blur_metric(work_frame)
-        is_blurry = blur_score < 60.0
-        quality = min(1.0, confidence * 1.1) * (max(0.20, blur_score / 100.0) if is_blurry else 1.0)
-
-        annotated = _draw_overlay(bgr_frame, dominant, raw_probs, scaled_box, blur_score, is_blurry)
-
-        return FaceResult(
-            emotion_probs=raw_probs, dominant_emotion=dominant,
-            face_confidence=confidence, face_quality=quality,
-            annotated_img=annotated, error=None,
-            blur_score=blur_score, is_blurry=is_blurry,
-            dip_applied=True, face_box=scaled_box,
-        )
     except Exception as exc:
+        print(f"[MAITRI] SSD detector notice: {exc}")
+    return None
+
+
+def _draw_standalone_overlay(
+    img: np.ndarray,
+    box: Optional[dict],
+    dominant: str,
+    confidence: float,
+    blur_score: float,
+    is_blurry: bool,
+    method: str = "none",
+) -> np.ndarray:
+    """Draw sleek aerospace corner-bracket reticle for standalone frame visualization."""
+    if img is None:
+        return img
+    out = img.copy()
+    if not box:
+        return out
+    bx, by = box.get("x", 0), box.get("y", 0)
+    bw, bh = box.get("w", 0), box.get("h", 0)
+    if bw <= 0 or bh <= 0:
+        return out
+
+    EMO_HUD_COLORS = {
+        "happy":    (0,   215, 255),
+        "neutral":  (210, 210, 210),
+        "surprise": (0,   180, 255),
+        "sad":      (255, 140, 50),
+        "fear":     (210, 90,  210),
+        "angry":    (50,  50,  240),
+        "disgust":  (50,  200, 50),
+    }
+    col = (0, 165, 255) if is_blurry else EMO_HUD_COLORS.get(dominant.lower(), (0, 230, 118))
+    c_len = max(14, min(bw, bh) // 5)
+    thick = 2
+
+    # Corner brackets
+    cv2.line(out, (bx, by), (bx + c_len, by), col, thick)
+    cv2.line(out, (bx, by), (bx, by + c_len), col, thick)
+    cv2.line(out, (bx + bw, by), (bx + bw - c_len, by), col, thick)
+    cv2.line(out, (bx + bw, by), (bx + bw, by + c_len), col, thick)
+    cv2.line(out, (bx, by + bh), (bx + c_len, by + bh), col, thick)
+    cv2.line(out, (bx, by + bh), (bx, by + bh - c_len), col, thick)
+    cv2.line(out, (bx + bw, by + bh), (bx + bw - c_len, by + bh), col, thick)
+    cv2.line(out, (bx + bw, by + bh), (bx + bw, by + bh - c_len), col, thick)
+
+    # Center pip
+    cx, cy = bx + bw // 2, by + bh // 2
+    cv2.drawMarker(out, (cx, cy), col, cv2.MARKER_CROSS, 8, 1)
+
+    # Reticle badge
+    lbl = f"{dominant.upper()} {confidence*100:.0f}%"
+    lbl_y = max(by - 8, 20)
+    cv2.putText(out, lbl, (bx, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+    return out
+
+
+# ── Standalone Face Analysis ───────────────────────────────────────────────
+def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
+    """
+    Standalone face analysis function for single-frame calls.
+    Uses isotropic square cropping, passive DIP quality, and hybrid emotion recognition.
+    """
+    if bgr_frame is None or bgr_frame.size == 0:
         return FaceResult(
             emotion_probs=_uniform_probs(), dominant_emotion="neutral",
             face_confidence=0.0, face_quality=0.0,
-            annotated_img=bgr_frame, error=str(exc),
+            annotated_img=bgr_frame, error="Empty frame",
         )
+
+    orig_h, orig_w = bgr_frame.shape[:2]
+    target_w = 640
+    if orig_w > target_w:
+        scale = target_w / float(orig_w)
+        work_frame = cv2.resize(bgr_frame, (target_w, int(orig_h * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        scale = 1.0
+        work_frame = bgr_frame
+
+    work_h, work_w = work_frame.shape[:2]
+
+    # Try MediaPipe FaceLandmarker
+    try:
+        from modules.eye_module import _get_landmarker, extract_face_blendshapes
+        lm = _get_landmarker()
+        if lm is not None:
+            import mediapipe as mp
+            img_rgb = cv2.cvtColor(work_frame, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            res = lm.detect(mp_img)
+
+            if res and res.face_landmarks and len(res.face_landmarks) > 0:
+                landmarks = res.face_landmarks[0]
+                bs_dict = extract_face_blendshapes(res)
+                is_smiling, smile_score, cheek_score = evaluate_facs_smile(bs_dict)
+
+                box_dict, (x1, y1, x2, y2) = extract_isotropic_square_face_box(
+                    landmarks, work_w, work_h, margin_ratio=0.30
+                )
+                face_roi = work_frame[y1:y2, x1:x2]
+                if face_roi.size == 0:
+                    face_roi = work_frame
+
+                blur_score = compute_blur_metric(face_roi)
+                is_blurry = blur_score < 60.0
+                mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
+
+                onnx_sess = _get_onnx_session()
+                if onnx_sess is not None:
+                    deep_dom, deep_probs, deep_conf = _predict_onnx(face_roi)
+                else:
+                    deep_dom, deep_probs, deep_conf = _predict_fallback(face_roi)
+
+                dominant, fused_probs, conf, method = fuse_facs_with_deep_emotion(
+                    deep_dom, deep_probs, deep_conf, is_smiling, smile_score, cheek_score
+                )
+
+                quality = compute_face_quality(
+                    conf, blur_score, is_blurry, box_dict["w"], box_dict["h"],
+                    work_w, work_h, mean_brightness
+                )
+
+                if scale != 1.0:
+                    scaled_box = {
+                        "x": int(box_dict["x"] / scale),
+                        "y": int(box_dict["y"] / scale),
+                        "w": int(box_dict["w"] / scale),
+                        "h": int(box_dict["h"] / scale),
+                    }
+                else:
+                    scaled_box = box_dict
+
+                annotated = _draw_standalone_overlay(
+                    bgr_frame, scaled_box, dominant, conf, blur_score, is_blurry, method
+                )
+
+                return FaceResult(
+                    emotion_probs=fused_probs,
+                    dominant_emotion=dominant,
+                    face_confidence=conf,
+                    face_quality=quality,
+                    annotated_img=annotated,
+                    error=None,
+                    blur_score=blur_score,
+                    is_blurry=is_blurry,
+                    dip_applied=False,
+                    face_box=scaled_box,
+                    smile_score=smile_score,
+                    method=method,
+                )
+    except Exception as exc:
+        print(f"[MAITRI] MediaPipe in analyze_frame notice: {exc}")
+
+    # Secondary: SSD detector
+    ssd_res = _detect_ssd_face(work_frame, orig_w, orig_h, scale)
+    if ssd_res is not None:
+        annotated = _draw_standalone_overlay(
+            bgr_frame, ssd_res.face_box, ssd_res.dominant_emotion,
+            ssd_res.face_confidence, ssd_res.blur_score, ssd_res.is_blurry, ssd_res.method
+        )
+        ssd_res.annotated_img = annotated
+        return ssd_res
+
+    # No face detected
+    blur_score = compute_blur_metric(work_frame)
+    return FaceResult(
+        emotion_probs=_uniform_probs(),
+        dominant_emotion="neutral",
+        face_confidence=0.0,
+        face_quality=0.0,
+        annotated_img=bgr_frame,
+        error=None,
+        blur_score=blur_score,
+        is_blurry=blur_score < 60.0,
+        dip_applied=False,
+        face_box=None,
+        smile_score=0.0,
+        method="no_face",
+    )
 
 
 def img_to_rgb(img: np.ndarray) -> np.ndarray:
-    """BGR → RGB for st.image()."""
+    """BGR → RGB helper for Streamlit display."""
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
