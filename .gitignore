@@ -43,4 +43,8 @@ wheels/
 # Heavy neural network model binaries (local weights)
 models/*.onnx
 models/*.task
+models/*.json
+
+# SER training cache and audio synthesis
+.ser_cache/
 

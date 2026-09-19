@@ -200,171 +200,96 @@ def calculate_audio_quality(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MFCC Feature Extraction (numpy-only, <3 ms)
+# MFCC Feature Extraction (130-dim vector: MFCCs, deltas, spectral, fast pitch)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _hz_to_mel(hz: float) -> float:
-    return 2595.0 * np.log10(1.0 + hz / 700.0)
-
-
-def _mel_to_hz(mel: float) -> float:
-    return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
-
-
-def _mel_filterbank(n_filters: int, n_fft: int, sr: int,
-                    f_min: float = 0.0, f_max: float = None) -> np.ndarray:
-    """Build triangular mel filterbank matrix (n_filters × n_fft//2+1)."""
-    if f_max is None:
-        f_max = sr / 2.0
-    mel_min = _hz_to_mel(f_min)
-    mel_max = _hz_to_mel(f_max)
-    mel_points = np.linspace(mel_min, mel_max, n_filters + 2)
-    hz_points  = np.array([_mel_to_hz(m) for m in mel_points])
-    bin_pts    = np.floor((n_fft + 1) * hz_points / sr).astype(int)
-    n_bins = n_fft // 2 + 1
-    fb = np.zeros((n_filters, n_bins), dtype=np.float32)
-    for m in range(1, n_filters + 1):
-        f_m   = bin_pts[m]
-        f_m1  = bin_pts[m - 1]
-        f_m2  = bin_pts[m + 1]
-        for k in range(f_m1, f_m):
-            fb[m - 1, k] = (k - f_m1) / (f_m - f_m1 + 1e-9)
-        for k in range(f_m, f_m2):
-            fb[m - 1, k] = (f_m2 - k) / (f_m2 - f_m + 1e-9)
-    return fb
-
-
-# Cached filterbank (built once at first call for 16kHz/22050Hz)
-_MEL_FB_CACHE: Dict[tuple, np.ndarray] = {}
-
-
-def _dct_matrix(n: int) -> np.ndarray:
-    """Orthonormal DCT-II matrix of shape (n, n)."""
-    k = np.arange(n, dtype=np.float32)
-    m = np.arange(n, dtype=np.float32)
-    D = np.cos(np.pi / n * np.outer(m + 0.5, k + 1))
-    D *= np.sqrt(2.0 / n)
-    return D
-
-
-_DCT_CACHE: Dict[int, np.ndarray] = {}
-
-
-def extract_mfcc_features_numpy(
+def extract_ser_features(
     signal: np.ndarray,
     sr: int = 16000,
     n_mfcc: int = 40,
-    n_fft: int = 512,
-    hop_length: int = 160,
-    n_mels: int = 80,
 ) -> Optional[np.ndarray]:
     """
-    Pure-numpy 129-dimensional feature extractor, no librosa dependency at runtime.
-    Features: [40 MFCC mean | 40 delta-MFCC mean | 40 delta2-MFCC mean |
-               spectral_centroid mean/std | spectral_rolloff mean/std |
-               ZCR mean/std | RMS mean/std | pitch_spread | pitch_mean]
-
-    Runs in < 3 ms on CPU for a 3-second audio clip.
+    Extract 130-dimensional acoustic feature vector matching training distribution:
+    - 40 MFCC mean
+    - 40 delta-MFCC mean
+    - 40 delta2-MFCC mean
+    - spectral centroid (mean, std)
+    - spectral rolloff (mean, std)
+    - zero-crossing rate (mean, std)
+    - RMS energy (mean, std)
+    - pitch spread & pitch mean from fast autocorrelation
     """
-    sig = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
-    # Trim silence
-    thresh = 0.005 * float(np.max(np.abs(sig)) + 1e-9)
-    mask = np.abs(sig) > thresh
-    if mask.any():
-        start = int(np.argmax(mask))
-        end   = len(sig) - int(np.argmax(mask[::-1]))
-        sig   = sig[start:end]
+    if signal is None:
+        return None
+    try:
+        import librosa
+        sig = np.nan_to_num(np.asarray(signal, dtype=np.float32)).ravel()
+        if len(sig) < int(sr * 0.15):
+            return None
 
-    if len(sig) < n_fft:
+        # Trim low-energy padding
+        sig_trimmed, _ = librosa.effects.trim(sig, top_db=20)
+        if len(sig_trimmed) >= int(sr * 0.15):
+            sig = sig_trimmed
+
+        # 40 MFCCs + deltas
+        mfcc = librosa.feature.mfcc(y=sig, sr=sr, n_mfcc=n_mfcc)
+        d1   = librosa.feature.delta(mfcc, order=1)
+        d2   = librosa.feature.delta(mfcc, order=2)
+
+        # Spectral characteristics
+        centroid = librosa.feature.spectral_centroid(y=sig, sr=sr)[0]
+        rolloff  = librosa.feature.spectral_rolloff(y=sig, sr=sr, roll_percent=0.85)[0]
+        zcr      = librosa.feature.zero_crossing_rate(sig)[0]
+        rms      = librosa.feature.rms(y=sig)[0]
+
+        # Fast autocorrelation pitch (sub-millisecond execution)
+        n_fft    = 512
+        hop_len  = 256
+        min_lag  = max(1, int(sr / 800))
+        max_lag  = int(sr / 60)
+        n_frames = (len(sig) - n_fft) // hop_len + 1
+        f0_list  = []
+
+        if n_frames >= 3:
+            indices = (np.arange(n_fft)[None, :] +
+                       np.arange(n_frames)[:, None] * hop_len)
+            frames_mat = sig[np.minimum(indices, len(sig) - 1)] * np.hanning(n_fft).astype(np.float32)
+            energies = np.sum(frames_mat ** 2, axis=1)
+            thresh_e = float(np.mean(energies)) * 0.30
+
+            for frm in frames_mat[::3]:
+                if np.sum(frm ** 2) < thresh_e:
+                    continue
+                c  = np.correlate(frm, frm, mode="full")[n_fft - 1:]
+                cw = c[min_lag:min(max_lag, len(c))]
+                if len(cw) < 3 or c[0] < 1e-6:
+                    continue
+                pk = int(np.argmax(cw))
+                is_local = (0 < pk < len(cw) - 1 and cw[pk] >= cw[pk - 1] and cw[pk] >= cw[pk + 1])
+                if is_local and (cw[pk] / c[0]) > 0.30:
+                    f0_list.append(float(sr) / (min_lag + pk))
+
+        pitch_spread = float(np.std(f0_list))  if len(f0_list) > 1 else 0.0
+        pitch_mean   = float(np.mean(f0_list)) if len(f0_list) > 0 else 0.0
+
+        feat = np.concatenate([
+            np.mean(mfcc, axis=1),                       # 40
+            np.mean(d1,   axis=1),                       # 40
+            np.mean(d2,   axis=1),                       # 40
+            [float(np.mean(centroid)), float(np.std(centroid))],   # 2
+            [float(np.mean(rolloff)),  float(np.std(rolloff))],    # 2
+            [float(np.mean(zcr)),      float(np.std(zcr))],        # 2
+            [float(np.mean(rms)),      float(np.std(rms))],        # 2
+            [pitch_spread, pitch_mean],                            # 2
+        ]).astype(np.float32)
+
+        return feat
+    except Exception:
         return None
 
-    # Pre-emphasis
-    sig = np.concatenate([[sig[0]], sig[1:] - 0.97 * sig[:-1]])
-
-    # STFT
-    n_frames = (len(sig) - n_fft) // hop_length + 1
-    if n_frames < 5:
-        return None
-
-    indices = (np.arange(n_fft)[None, :] +
-               np.arange(n_frames)[:, None] * hop_length)
-    frames = sig[indices] * np.hanning(n_fft).astype(np.float32)
-    spec = np.abs(np.fft.rfft(frames, n=n_fft)).astype(np.float32)  # (n_frames, n_fft//2+1)
-
-    # Mel filterbank
-    cache_key = (n_mels, n_fft, sr)
-    if cache_key not in _MEL_FB_CACHE:
-        _MEL_FB_CACHE[cache_key] = _mel_filterbank(n_mels, n_fft, sr)
-    fb = _MEL_FB_CACHE[cache_key]
-
-    # Log Mel spectrogram
-    mel_spec = np.maximum(spec @ fb.T, 1e-9)    # (n_frames, n_mels)
-    log_mel  = np.log(mel_spec)
-
-    # DCT → MFCCs
-    if n_mfcc not in _DCT_CACHE:
-        _DCT_CACHE[n_mfcc] = _dct_matrix(n_mels)[:n_mfcc]
-    dct = _DCT_CACHE[n_mfcc]
-    mfcc = (log_mel @ dct.T).astype(np.float32)  # (n_frames, n_mfcc)
-
-    # Delta MFCCs (first and second order temporal derivatives)
-    def _delta(m: np.ndarray, w: int = 2) -> np.ndarray:
-        T = m.shape[0]
-        d = np.zeros_like(m)
-        for t in range(T):
-            num = sum(k * (m[min(t + k, T - 1)] - m[max(t - k, 0)]) for k in range(1, w + 1))
-            den = 2 * sum(k * k for k in range(1, w + 1))
-            d[t] = num / (den + 1e-9)
-        return d
-
-    d1 = _delta(mfcc)
-    d2 = _delta(d1)
-
-    mfcc_mean = np.mean(mfcc, axis=0)   # 40
-    d1_mean   = np.mean(d1,   axis=0)   # 40
-    d2_mean   = np.mean(d2,   axis=0)   # 40
-
-    # Spectral features
-    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)  # (n_fft//2+1,)
-    spec_sum = np.sum(spec, axis=1) + 1e-9       # (n_frames,)
-
-    centroid = np.sum(spec * freqs[None, :], axis=1) / spec_sum       # (n_frames,)
-    cumsum   = np.cumsum(spec, axis=1)
-    roll_idx = np.argmax(cumsum >= 0.85 * spec_sum[:, None], axis=1)
-    rolloff  = freqs[np.minimum(roll_idx, len(freqs) - 1)]             # (n_frames,)
-    zcr      = np.mean(np.abs(np.diff(np.sign(frames), axis=1)), axis=1) * 0.5
-    rms      = np.sqrt(np.mean(frames ** 2, axis=1))
-
-    # Fast pitch via autocorrelation (voiced frames only)
-    min_lag = max(1, int(sr / 800))   # 800 Hz upper bound
-    max_lag = int(sr / 60)            # 60 Hz lower bound
-    f0_list = []
-    for frm in frames[::4]:  # every 4th frame for speed
-        c = np.correlate(frm, frm, mode="full")[n_fft - 1:]
-        if c[0] < 1e-6:
-            continue
-        cw = c[min_lag:min(max_lag, len(c))]
-        if len(cw) < 3:
-            continue
-        pk = int(np.argmax(cw))
-        is_local = (0 < pk < len(cw) - 1 and cw[pk] >= cw[pk - 1] and cw[pk] >= cw[pk + 1])
-        if is_local and (cw[pk] / c[0]) > 0.3:
-            f0_list.append(float(sr) / (min_lag + pk))
-
-    pitch_spread = float(np.std(f0_list))  if len(f0_list) > 1 else 0.0
-    pitch_mean   = float(np.mean(f0_list)) if len(f0_list) > 0 else 0.0
-
-    feat = np.concatenate([
-        mfcc_mean,                                   # 40
-        d1_mean,                                     # 40
-        d2_mean,                                     # 40
-        [float(np.mean(centroid)), float(np.std(centroid))],   # 2
-        [float(np.mean(rolloff)),  float(np.std(rolloff))],    # 2
-        [float(np.mean(zcr)),      float(np.std(zcr))],        # 2
-        [float(np.mean(rms)),      float(np.std(rms))],        # 2
-        [pitch_spread, pitch_mean],                            # 2
-    ]).astype(np.float32)
-    return feat
+# Alias for backward compatibility
+extract_mfcc_features_numpy = extract_ser_features
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -380,22 +305,26 @@ def _predict_mfcc_mlp(signal: np.ndarray, sr: int = 16000) -> Optional[Dict[str,
     if sess is None:
         return None
 
-    feat = extract_mfcc_features_numpy(signal, sr=sr)
+    feat = extract_ser_features(signal, sr=sr)
     if feat is None:
         return None
 
     try:
         inp_name = sess.get_inputs()[0].name
-        probs_raw = sess.run(None, {inp_name: feat.reshape(1, -1)})[0][0]
+        outputs = sess.run(None, {inp_name: feat.reshape(1, -1)})
 
-        # Map model class names to MAITRI emotions
-        class_names = meta.get("class_names", EMOTIONS) if meta else EMOTIONS
         out_probs = {e: 0.0 for e in EMOTIONS}
-        for i, cls in enumerate(class_names):
-            if cls in out_probs and i < len(probs_raw):
-                out_probs[cls] = float(probs_raw[i])
+        if len(outputs) > 1 and isinstance(outputs[1], list) and len(outputs[1]) > 0:
+            prob_dict = outputs[1][0]
+            if isinstance(prob_dict, dict):
+                for k, v in prob_dict.items():
+                    if k in out_probs:
+                        out_probs[k] = float(v)
+        elif len(outputs) > 0 and len(outputs[0]) > 0:
+            pred_label = str(outputs[0][0])
+            if pred_label in out_probs:
+                out_probs[pred_label] = 1.0
 
-        # Re-normalize
         total = sum(out_probs.values())
         if total > 1e-6:
             out_probs = {k: v / total for k, v in out_probs.items()}
@@ -567,8 +496,12 @@ def predict_voice_emotion(
         except Exception as exc:
             print(f"[VoiceModule] Wav2Vec2 inference error: {exc}")
 
-    # 7. MFCC-MLP ONNX inference (uses the same sig_target at 16kHz)
-    mlp_probs = _predict_mfcc_mlp(sig_target, sr=sampling_rate)
+    # 7. MFCC-MLP ONNX inference (active when audio has natural speech characteristics)
+    # Reject artificial single-frequency or unmodulated continuous tones (mod_depth < 0.10 or pitch_spread < 5.0)
+    if dap is not None and (dap.pitch_spread < 5.0 or dap.modulation_depth < 0.10):
+        mlp_probs = None
+    else:
+        mlp_probs = _predict_mfcc_mlp(sig_target, sr=sampling_rate)
 
     # 8. Ensemble fusion
     fused_probs = _ensemble_predictions(wav2vec2_probs, mlp_probs, quality)

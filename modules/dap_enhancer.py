@@ -285,7 +285,7 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
         return True
 
     # 2. Voiced vocal laughter trigger: natural vowel bursts ("ha-ha", "ho-ho", "he-he")
-    if r_env >= 0.60 and mod_depth >= 0.75 and centroid >= 400.0:
+    if r_env >= 0.60 and mod_depth >= 0.75 and centroid >= 300.0:
         return True
 
     return False
@@ -295,14 +295,6 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
     """
     Computes additive logit calibration priors matching model classes:
     [0: angry, 1: neutral, 2: disgust, 3: fear, 4: happy, 5: sad, 6: surprise]
-
-    - Cheerful voice (expressive pitch spread or bright intonation):
-      Boosts 'happy' (+2.0 to +5.0) and dampens unvoiced 'sad' sink logit.
-    - Laughter cadence (rhythmic staccato bursts R_env >= 0.35, mod_depth >= 0.40):
-      Boosts 'happy' (+3.0) and dampens 'sad' (-2.0).
-    - Somber voice (voiced speech with flat low pitch σ(F0) < 15 Hz, centroid < 1200 Hz,
-      and strictly non-rhythmic R_env < 0.25, mod_depth < 0.40):
-      Boosts 'sad' (+2.0) and dampens 'happy'.
     """
     prior = np.zeros(7, dtype=np.float32)
     if dap is None:
@@ -338,49 +330,31 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
     elif mod_depth is None:
         mod_depth = 0.0
 
-    # Laughter/chuckle cadence: rhythmic modulation (softened thresholds)
-    if r_env >= 0.28 and mod_depth >= 0.35 and centroid >= 300.0:
-        boost = 3.0 + min(2.0, r_env * 3.0)
-        prior[4] += boost   # happy
-        prior[5] -= 2.5     # sad
+    # Laughter/chuckle cadence: rhythmic modulation
+    if r_env >= 0.35 and mod_depth >= 0.40 and centroid >= 350.0:
+        prior[4] += 3.0   # happy
+        prior[5] -= 2.0   # sad
 
-    # Cheerful voice — Tier 1: strong (wide pitch + bright centroid)
-    if pitch_spread > 30.0 and centroid > 1600.0:
-        boost = 4.0 + min(2.5, (pitch_spread - 30.0) / 12.0)
-        prior[4] += boost   # happy
-        prior[5] -= 2.5     # sad
-    # Tier 2: moderate evidence
-    elif pitch_spread > 20.0 or (pitch_spread > 15.0 and centroid > 500.0):
-        boost = 2.5 + min(2.0, (pitch_spread - 15.0) / 10.0)
+    # Cheerful voice: broad pitch variations and/or bright acoustic centroid
+    if pitch_spread > 35.0 and centroid > 1800.0:
+        boost = 3.5 + min(2.0, (pitch_spread - 35.0) / 15.0)
         prior[4] += boost   # happy
         prior[5] -= 2.0     # sad
-    # Tier 3: any voiced speech with some pitch variability
-    elif pitch_spread > 10.0 and centroid > 300.0:
-        prior[4] += 1.5     # happy
+    elif pitch_spread > 25.0 or (pitch_spread > 20.0 and centroid > 350.0):
+        boost = 2.0 + min(2.0, (pitch_spread - 20.0) / 10.0)
+        prior[4] += boost   # happy
+        prior[5] -= 1.5     # sad
+    elif pitch_spread > 30.0 or (pitch_spread > 25.0 and centroid > 1500.0):
+        prior[4] += 2.0     # happy
         prior[5] -= 1.0     # sad
 
-    # Angry / fear: high pitch + wide variation + modulation
-    if f0_mean > 200.0 and pitch_spread > 25.0 and mod_depth > 0.50:
-        prior[0] += 2.0     # angry
-        prior[2] += 1.0     # fear
-        prior[5] -= 1.5     # sad
-
-    # Fear: very high pitch, erratic intonation
-    if f0_mean > 250.0 and pitch_spread > 40.0:
-        prior[3] += 2.5     # fear
-        prior[5] -= 1.5     # sad
-
-    # Disgust: low centroid, low monotone pitch
-    if centroid < 500.0 and 0.0 < f0_mean < 130.0 and pitch_spread < 10.0:
-        prior[2] += 1.0     # disgust
-
-    # Somber / sad: voiced low-freq monotone, non-rhythmic
+    # Somber voice: voiced low-frequency monotone, non-rhythmic (no bursts)
     if (
-        60.0 <= f0_mean <= 160.0
-        and pitch_spread < 12.0
-        and centroid < 1000.0
-        and r_env < 0.20
-        and mod_depth < 0.35
+        60.0 <= f0_mean <= 170.0
+        and pitch_spread < 15.0
+        and centroid < 1200.0
+        and r_env < 0.25
+        and mod_depth < 0.40
     ):
         prior[5] += 2.0     # sad
         prior[4] -= 1.5     # happy
@@ -391,27 +365,23 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
 def calibrate_logits(
     raw_logits: np.ndarray,
     dap: Optional[Union[DAPProsody, Dict[str, Any], Any]] = None,
-    centering_factor: float = 0.80,
+    centering_factor: float = 0.60,
 ) -> np.ndarray:
     """
-    Calibrates raw Wav2Vec2 logits to fix the idle-sink sad bias.
-
-    1. Aggressive baseline centering: z_cal = z - 0.80 * z0
-       Cancels >80% of the +8.79 logit unvoiced idle bias (was 0.60).
-    2. Fixed -1.5 logit penalty to sad class [idx 5] for residual bias.
-    3. Additive prosodic prior: z_cal += prior(dap)
+    Calibrates raw Wav2Vec2 logits:
+    1. Soft baseline centering: z_cal = z - centering_factor * z0
+       Cancels the artificial +8.79 logit unvoiced idle bias.
+    2. Additive prosodic prior: z_cal += prior(dap)
 
     Args:
         raw_logits:       1D numpy array of 7 raw logits from Wav2Vec2 ONNX.
-        dap:              Optional DAPProsody with prosodic acoustic metrics.
-        centering_factor: Idle bias subtraction coefficient (default 0.80).
+        dap:              Optional DAPProsody object with prosodic acoustic metrics.
+        centering_factor: Soft subtraction coefficient (default 0.60).
 
     Returns:
         Calibrated 1D float32 logit array.
     """
     logits = np.asarray(raw_logits, dtype=np.float32)
-
-    # Aggressive baseline centering
     cal_logits = logits - (centering_factor * Z_IDLE_BASELINE)
 
     if dap is not None:

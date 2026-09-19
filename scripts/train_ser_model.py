@@ -54,8 +54,12 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 import sklearn
 print(f"  librosa {librosa.__version__}, sklearn {sklearn.__version__}", flush=True)
 
+sys.path.insert(0, str(BASE_DIR))
+from modules.voice_module import extract_ser_features
+
 MAITRI_EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 SR = 22050
+SR = 16000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EMOTION PROSODY PARAMETERS for espeak-ng
@@ -272,71 +276,9 @@ def generate_synthetic_audio(force: bool = False) -> list:
 N_MFCC = 40
 
 def extract_features(y: np.ndarray, sr: int = SR) -> np.ndarray | None:
-    """
-    Extract 129-dim acoustic feature vector (MFCCs + deltas + spectral + fast pitch).
-    Returns None if audio is too short or empty.
-    """
-    try:
-        y, _ = librosa.effects.trim(y, top_db=20)
-        if len(y) < int(sr * 0.15):
-            return None
+    """Extract 130-dim acoustic feature vector using canonical extract_ser_features."""
+    return extract_ser_features(y, sr=sr, n_mfcc=N_MFCC)
 
-        # MFCCs + first and second order temporal derivatives
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC)
-        d1   = librosa.feature.delta(mfcc, order=1)
-        d2   = librosa.feature.delta(mfcc, order=2)
-
-        # Spectral features
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-        rolloff  = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)[0]
-        zcr      = librosa.feature.zero_crossing_rate(y)[0]
-        rms      = librosa.feature.rms(y=y)[0]
-
-        # Fast pitch (F0) spread via autocorrelation — 300x faster than librosa.pyin
-        n_fft    = 512
-        hop_len  = 256
-        min_lag  = max(1, int(sr / 800))  # 800 Hz upper limit
-        max_lag  = int(sr / 60)           # 60 Hz lower limit
-        n_frames = (len(y) - n_fft) // hop_len + 1
-        f0_list  = []
-
-        if n_frames >= 3:
-            indices = (np.arange(n_fft)[None, :] +
-                       np.arange(n_frames)[:, None] * hop_len)
-            frames_mat = y[np.minimum(indices, len(y) - 1)] * np.hanning(n_fft).astype(np.float32)
-            energies = np.sum(frames_mat ** 2, axis=1)
-            thresh_e = float(np.mean(energies)) * 0.30
-
-            for frm in frames_mat[::3]:  # every 3rd frame is sufficient
-                if np.sum(frm ** 2) < thresh_e:
-                    continue
-                c  = np.correlate(frm, frm, mode="full")[n_fft - 1:]
-                cw = c[min_lag:min(max_lag, len(c))]
-                if len(cw) < 3 or c[0] < 1e-6:
-                    continue
-                pk = int(np.argmax(cw))
-                is_local = (0 < pk < len(cw) - 1 and cw[pk] >= cw[pk - 1] and cw[pk] >= cw[pk + 1])
-                if is_local and (cw[pk] / c[0]) > 0.30:
-                    f0_list.append(float(sr) / (min_lag + pk))
-
-        pitch_spread = float(np.std(f0_list))  if len(f0_list) > 1 else 0.0
-        pitch_mean   = float(np.mean(f0_list)) if len(f0_list) > 0 else 0.0
-
-        feat = np.concatenate([
-            np.mean(mfcc, axis=1),                       # 40
-            np.mean(d1,   axis=1),                       # 40
-            np.mean(d2,   axis=1),                       # 40
-            [np.mean(centroid), np.std(centroid)],       # 2
-            [np.mean(rolloff),  np.std(rolloff)],        # 2
-            [np.mean(zcr),      np.std(zcr)],            # 2
-            [np.mean(rms),      np.std(rms)],            # 2
-            [pitch_spread, pitch_mean],                  # 2
-        ]).astype(np.float32)
-
-        return feat
-
-    except Exception as e:
-        return None
 
 
 def augment_and_extract(y: np.ndarray, sr: int, label: str) -> list:
