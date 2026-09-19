@@ -38,10 +38,14 @@ try:
 
     _orig_reset_context = _st_webrtc_comp._reset_context
     def _patched_reset_context(context):
+        # If user explicitly stopped via frontend toggle (state is neither playing nor signalling), allow clean reset
+        if not getattr(context.state, "playing", False) and not getattr(context.state, "signalling", False):
+            _orig_reset_context(context)
+            return
         worker = context._get_worker() if hasattr(context, "_get_worker") else None
         if worker is not None:
             pc = getattr(worker, "pc", None)
-            if pc and getattr(pc, "connectionState", None) in ("new", "checking", "connected"):
+            if pc and getattr(pc, "connectionState", None) not in ("closed", "failed"):
                 return  # Active streaming connection — do not tear down
         _orig_reset_context(context)
     _st_webrtc_comp._reset_context = _patched_reset_context
@@ -51,7 +55,11 @@ try:
         if key in st.session_state:
             ctx = st.session_state[key]
             worker = ctx._get_worker() if hasattr(ctx, "_get_worker") else None
-            is_active = (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) in ("new", "checking", "connected")) or getattr(ctx.state, "playing", False)
+            is_active = (
+                (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
+                or getattr(ctx.state, "playing", False)
+                or getattr(ctx.state, "signalling", False)
+            )
             if is_active:
                 sinfo = _st_webrtc_comp.get_this_session_info()
                 rc = _st_webrtc_comp.get_script_run_count(sinfo) if sinfo else None
@@ -64,7 +72,11 @@ try:
     def _patched_restore_snapshot(context, component_value):
         if component_value is None and getattr(context, "_component_value_snapshot", None) is not None:
             worker = context._get_worker() if hasattr(context, "_get_worker") else None
-            is_active = (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) in ("new", "checking", "connected")) or getattr(context.state, "playing", False)
+            is_active = (
+                (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
+                or getattr(context.state, "playing", False)
+                or getattr(context.state, "signalling", False)
+            )
             if is_active:
                 sinfo = _st_webrtc_comp.get_this_session_info()
                 rc = _st_webrtc_comp.get_script_run_count(sinfo) if sinfo else None
@@ -457,6 +469,11 @@ def _render_face_telemetry(is_playing: bool):
     f_box   = snap_f.get("face_box")
     is_blur = bool(snap_f.get("is_blurry", False))
     blur_sc = float(snap_f.get("blur_score", 100.0))
+
+    if not is_playing:
+        rtc_ctx = st.session_state.get("maitri-live")
+        if rtc_ctx and (getattr(rtc_ctx.state, "playing", False) or getattr(rtc_ctx.state, "signalling", False)):
+            is_playing = True
 
     if not is_playing:
         st.markdown(
@@ -868,6 +885,29 @@ with tab_live:
                 ]
             }
         )
+
+        # ── Prevent Streamlit fragments from desyncing WebRTC run counters ──
+        if "maitri-live" in st.session_state:
+            _rtc_ctx = st.session_state["maitri-live"]
+            try:
+                from streamlit_webrtc.component import (
+                    get_this_session_info,
+                    get_script_run_count,
+                    ComponentValueSnapshot,
+                )
+                _sinfo = get_this_session_info()
+                if _sinfo:
+                    _rc = get_script_run_count(_sinfo)
+                    if _rc is not None:
+                        if _rtc_ctx._last_rendered_run_count is not None:
+                            _rtc_ctx._last_rendered_run_count = _rc - 1
+                        if getattr(_rtc_ctx, "_component_value_snapshot", None) is not None:
+                            _rtc_ctx._component_value_snapshot = ComponentValueSnapshot(
+                                component_value=_rtc_ctx._component_value_snapshot.component_value,
+                                run_count=_rc - 1,
+                            )
+            except Exception:
+                pass
 
         # Refresh thread-safe references before WebRTC worker initialization
         _ACTIVE_LIVE_STATE = st.session_state.live_state
