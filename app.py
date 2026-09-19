@@ -217,8 +217,7 @@ class MAITRIVideoProcessor:
             try:
                 face_res, eye_res = process_unified_frame(bgr, self.eye_state)
                 ls = self.live_state
-                f_lock = getattr(ls, "face_lock", ls.lock)
-                with f_lock:
+                with ls.lock:
                     if face_res is not None:
                         ls.face_emotion    = face_res.dominant_emotion
                         ls.emotion_probs   = {
@@ -251,9 +250,7 @@ class MAITRIVideoProcessor:
             bgr = frame.to_ndarray(format="bgr24")
             ls  = self.live_state
 
-            # Update frame count under face_lock exclusively
-            f_lock = getattr(ls, "face_lock", ls.lock)
-            with f_lock:
+            with ls.lock:
                 ls.frame_count += 1
 
             # Non-blocking single-copy dispatch to unified worker
@@ -456,117 +453,21 @@ st.markdown(
 )
 st.markdown("---")
 
-# ─────────────────────────────────────────────────────────────────────────
-# LIVE TELEMETRY FRAGMENTS (Smooth 1 Hz Refresh Without UI Lock)
-# ─────────────────────────────────────────────────────────────────────────
-@st.fragment(run_every=1.0)
-def _render_face_telemetry(is_playing: bool):
-    ls = st.session_state.live_state
-    snap_f = ls.snapshot_face() if hasattr(ls, "snapshot_face") else ls.snapshot()
-    f_emo   = str(snap_f.get("face_emotion", "neutral")).lower()
-    f_conf  = float(snap_f.get("face_confidence", 0.0))
-    f_probs = dict(snap_f.get("emotion_probs", {}))
-    f_box   = snap_f.get("face_box")
-    is_blur = bool(snap_f.get("is_blurry", False))
-    blur_sc = float(snap_f.get("blur_score", 100.0))
-
-    if not is_playing:
-        rtc_ctx = st.session_state.get("maitri-live")
-        if rtc_ctx and (getattr(rtc_ctx.state, "playing", False) or getattr(rtc_ctx.state, "signalling", False)):
-            is_playing = True
-
-    if not is_playing:
-        st.markdown(
-            """
-            <div style="background:#161d2b; border:2px solid #2a384c; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <div>
-                <div style="font-size:0.72rem; color:#60718b; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
-                <div style="font-size:1.35rem; font-weight:bold; color:#8b9cb5; margin-top:2px;">📷 CAMERA STANDBY</div>
-              </div>
-              <div style="text-align:right;">
-                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#78889e; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
-                  IDLE
-                </span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+def _render_dip_status(is_playing: bool):
+    if is_playing:
+        snap_v = st.session_state.live_state.snapshot()
+        blur_status = (
+            "<span style='color:#f39c12;'>⚠️ Motion Blur (Fusion Gated)</span>"
+            if snap_v["is_blurry"]
+            else f"<span style='color:#2ecc71;'>✅ Sharp ({snap_v['blur_score']:.0f})</span>"
         )
-        return
-
-    theme_col = EMO_COLORS.get(f_emo, "#00e676")
-    has_face  = (f_box is not None or f_conf > 0.10)
-
-    # 1. Instant Face Emotion Badge
-    if has_face:
         st.markdown(
-            f"""
-            <div style="background:{theme_col}18; border:2px solid {theme_col}; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <div>
-                <div style="font-size:0.72rem; color:#8b9cb5; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
-                <div style="font-size:1.35rem; font-weight:bold; color:{theme_col}; margin-top:2px;">😊 {f_emo.upper()} ({f_conf*100:.0f}%)</div>
-              </div>
-              <div style="text-align:right;">
-                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#13381e; color:#00e676; font-size:0.75rem; font-weight:600; border:1px solid #00e67655; box-shadow:0 0 8px #00e67644;">
-                  🎯 FACE LOCKED
-                </span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            """
-            <div style="background:#161d2b; border:2px solid #2a384c; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <div>
-                <div style="font-size:0.72rem; color:#60718b; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
-                <div style="font-size:1.35rem; font-weight:bold; color:#8b9cb5; margin-top:2px;">🔍 SCANNING ASTRONAUT...</div>
-              </div>
-              <div style="text-align:right;">
-                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#78889e; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
-                  SEARCHING
-                </span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # 2. Face Emotion Distribution (7-Class FER)
-    st.markdown("<div style='font-size:0.83rem;font-weight:600;margin-bottom:4px;'>Face Emotion Distribution (7-Class FER)</div>", unsafe_allow_html=True)
-    sorted_f = sorted(f_probs.items(), key=lambda x: x[1], reverse=True)
-    for emo, prob in sorted_f:
-        pct = round(prob * 100, 1)
-        bar_w = max(pct, 1)
-        bar_color = EMO_COLORS.get(emo, "#888")
-        marker = " ◀" if (f_conf > 0.0 and emo == f_emo) else ""
-        st.markdown(
-            f"<div class='emo-row'>"
-            f"<span class='emo-label'>{emo}</span>"
-            f"<div class='emo-bar-bg'>"
-            f"<div class='emo-bar' style='width:{bar_w}%;background:{bar_color};'></div>"
-            f"</div>"
-            f"<span class='emo-pct'>{pct:.1f}%{marker}</span>"
+            f"<div style='background:#1b2838;padding:8px 12px;border-radius:6px;font-size:0.83rem;margin-top:6px;border:1px solid #2a475e;'>"
+            f"🛡️ <b>Vision Pipeline:</b> Hybrid FACS (AU12/AU6) + EfficientNet ONNX (Isotropic Square Crop) &nbsp;|&nbsp; "
+            f"<b>Clarity:</b> {blur_status}"
             f"</div>",
             unsafe_allow_html=True,
         )
-
-    # 3. Vision Pipeline & Clarity Telemetry
-    blur_status = (
-        "<span style='color:#f39c12;'>⚠️ Motion Blur (Gated)</span>"
-        if is_blur
-        else f"<span style='color:#2ecc71;'>✅ Sharp ({blur_sc:.0f})</span>"
-    )
-    st.markdown(
-        f"""
-        <div style="background:#1b2838; padding:8px 12px; border-radius:6px; font-size:0.83rem; margin-top:8px; border:1px solid #2a475e; display:flex; justify-content:space-between; align-items:center;">
-          <span>🛡️ <b>Vision Pipeline:</b> Hybrid FACS (AU12/AU6) + EfficientNet ONNX</span>
-          <span><b>Clarity:</b> {blur_status}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 @st.fragment(run_every=1.0)
@@ -923,7 +824,7 @@ with tab_live:
             async_processing=True,
         )
 
-        _render_face_telemetry(ctx.state.playing)
+        _render_dip_status(ctx.state.playing)
 
     with col_voice:
         st.subheader("🎙️ Voice Emotion & Acoustic Telemetry")
