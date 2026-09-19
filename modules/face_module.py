@@ -93,10 +93,10 @@ def _get_onnx_session():
         _onnx_init_attempted = True
 
         candidate_paths = [
-            os.path.join(_MODELS_DIR, "enet_b2_7.onnx"),
             os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
-            os.path.expanduser("~/.hsemotion/enet_b2_7.onnx"),
+            os.path.join(_MODELS_DIR, "enet_b2_7.onnx"),
             os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
+            os.path.expanduser("~/.hsemotion/enet_b2_7.onnx"),
         ]
 
         found_path = None
@@ -438,8 +438,8 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
 
     orig_h, orig_w = bgr_frame.shape[:2]
 
-    # Downscale for high-speed landmark detection if resolution > 480w
-    target_w = 480
+    # Downscale for high-speed landmark detection if resolution > 640w
+    target_w = 640
     if orig_w > target_w:
         scale = target_w / float(orig_w)
         work_frame = cv2.resize(bgr_frame, (target_w, int(orig_h * scale)), interpolation=cv2.INTER_LINEAR)
@@ -563,14 +563,14 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         except Exception as exc:
             print(f"[MAITRI] Unified FaceLandmarker error: {exc}")
 
-    # Transient motion persistence / coasting window (preserves smooth tracking across fast head movements)
+    # Transient motion persistence window (absorbs single momentary frame drops without lagging behind motion)
     if eye_session is not None and getattr(eye_session, "last_face_box", None) is not None:
         eye_session.consecutive_missing = getattr(eye_session, "consecutive_missing", 0) + 1
-        if eye_session.consecutive_missing <= 10:
+        if eye_session.consecutive_missing <= 2:
             prev_f = eye_session.last_face_res
             prev_e = eye_session.last_eye_res
             coasted_box = dict(eye_session.last_face_box)
-            coasted_decay = 0.95 ** min(eye_session.consecutive_missing, 10)
+            coasted_decay = 0.95 ** min(eye_session.consecutive_missing, 2)
             coasted_conf = max(0.20, (prev_f.face_confidence if prev_f else 0.50) * coasted_decay)
             coasted_probs = dict(eye_session.face_ema_probs) if getattr(eye_session, "face_ema_probs", None) else _uniform_probs()
             coasted_dom = getattr(eye_session, "face_dominant", None) or (prev_f.dominant_emotion if prev_f else "neutral")
@@ -608,7 +608,7 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
             )
             return face_res, eye_res
 
-    # MediaPipe did not detect landmarks for > 10 frames; check SSD detector fallback directly without re-running MediaPipe
+    # MediaPipe did not detect landmarks; check SSD detector fallback directly without re-running MediaPipe
     ssd_res = _detect_ssd_face(work_frame, orig_w, orig_h, scale)
     if ssd_res is not None:
         if eye_session is not None:
@@ -623,9 +623,9 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         )
         return ssd_res, eye_res
 
-    # No face detected in frame (lost for > 10 frames and SSD also missed)
+    # No face detected in frame (lost for > 2 frames and SSD also missed)
     if eye_session is not None:
-        if getattr(eye_session, "consecutive_missing", 0) > 15:
+        if getattr(eye_session, "consecutive_missing", 0) > 2:
             eye_session.face_ema_probs = None
             eye_session.face_dominant  = None
             eye_session.last_face_box  = None
@@ -791,7 +791,7 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         )
 
     orig_h, orig_w = bgr_frame.shape[:2]
-    target_w = 480
+    target_w = 640
     if orig_w > target_w:
         scale = target_w / float(orig_w)
         work_frame = cv2.resize(bgr_frame, (target_w, int(orig_h * scale)), interpolation=cv2.INTER_LINEAR)

@@ -10,6 +10,7 @@ import threading
 import time
 import av
 import cv2
+cv2.setNumThreads(2)
 import numpy as np
 from typing import Optional
 import streamlit as st
@@ -256,12 +257,6 @@ class MAITRIVideoProcessor:
         # Single-slot queue — drops frames when background worker is busy (zero lag)
         self._inference_queue: queue.Queue = queue.Queue(maxsize=1)
 
-        # High-performance real-time optical flow face tracking state (30 FPS, zero lag)
-        self._tracked_box: Optional[dict] = None
-        self._last_raw_box: Optional[dict] = None
-        self._prev_gray: Optional[np.ndarray] = None
-        self._missing_worker_frames: int = 0
-
         # Unified background worker
         self._worker = threading.Thread(
             target=self._unified_inference_worker, daemon=True, name="maitri-unified-worker"
@@ -320,8 +315,7 @@ class MAITRIVideoProcessor:
         """
         Called for EVERY incoming video frame by streamlit-webrtc.
         Returns immediately — ML inference runs asynchronously in background worker.
-        Face reticle uses 30 FPS pyramidal Lucas-Kanade optical flow for silky-smooth,
-        zero-lag tracking during rapid head tilt, rotation, and translation.
+        Renders sleek aerospace HUD at locked 30 FPS with pure sub-millisecond execution.
         """
         try:
             bgr = frame.to_ndarray(format="bgr24")
@@ -329,108 +323,20 @@ class MAITRIVideoProcessor:
 
             ls.frame_count += 1
 
-            # Dispatch frame to worker (single-slot queue, drop stale frame without blocking)
-            try:
-                self._inference_queue.put_nowait(bgr.copy())
-            except queue.Full:
+            # Dispatch freshest frame to worker without blocking or queue accumulation
+            if self._inference_queue.full():
                 try:
                     self._inference_queue.get_nowait()
                 except queue.Empty:
                     pass
-                try:
-                    self._inference_queue.put_nowait(bgr.copy())
-                except queue.Full:
-                    pass
-
-            curr_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-            snap = ls.snapshot_face_nonblocking() if hasattr(ls, "snapshot_face_nonblocking") else ls.snapshot_face()
-            raw_box = snap.get("face_box")
-
-            # ── Sub-millisecond Optical Flow Face Reticle Tracking (30 FPS locked) ──
-            if raw_box is not None:
-                self._missing_worker_frames = 0
-            else:
-                self._missing_worker_frames += 1
-
-            if self._tracked_box is None and raw_box is not None:
-                self._tracked_box = {
-                    "x": float(raw_box["x"]),
-                    "y": float(raw_box["y"]),
-                    "w": float(raw_box["w"]),
-                    "h": float(raw_box["h"]),
-                }
-                self._last_raw_box = dict(raw_box)
-            elif self._tracked_box is not None:
-                # 1. Optical flow displacement from prev_gray to curr_gray
-                if (
-                    self._prev_gray is not None
-                    and self._prev_gray.shape == curr_gray.shape
-                ):
-                    bx = self._tracked_box["x"]
-                    by = self._tracked_box["y"]
-                    bw = self._tracked_box["w"]
-                    bh = self._tracked_box["h"]
-                    frame_h, frame_w = curr_gray.shape
-
-                    # Sample 3x3 grid points safely inside face box
-                    xs = np.linspace(max(0.0, bx + bw * 0.25), min(float(frame_w - 1), bx + bw * 0.75), 3)
-                    ys = np.linspace(max(0.0, by + bh * 0.25), min(float(frame_h - 1), by + bh * 0.75), 3)
-                    pts1 = np.array([[x, y] for x in xs for y in ys], dtype=np.float32).reshape(-1, 1, 2)
-
-                    try:
-                        pts2, st, _ = cv2.calcOpticalFlowPyrLK(
-                            self._prev_gray, curr_gray, pts1, None, winSize=(15, 15), maxLevel=2
-                        )
-                        good1 = pts1[st == 1]
-                        good2 = pts2[st == 1]
-                        if len(good1) >= 4:
-                            shift = np.median(good2 - good1, axis=0)
-                            dx = float(np.clip(shift[0], -80.0, 80.0))
-                            dy = float(np.clip(shift[1], -80.0, 80.0))
-                            self._tracked_box["x"] += dx
-                            self._tracked_box["y"] += dy
-                    except Exception:
-                        pass
-
-                # 2. Worker ground-truth re-anchoring & scale update
-                if raw_box is not None and raw_box != self._last_raw_box:
-                    self._last_raw_box = dict(raw_box)
-                    rx, ry = float(raw_box["x"]), float(raw_box["y"])
-                    rw, rh = float(raw_box["w"]), float(raw_box["h"])
-
-                    # Re-calibrate dimensions smoothly
-                    self._tracked_box["w"] = 0.70 * self._tracked_box["w"] + 0.30 * rw
-                    self._tracked_box["h"] = 0.70 * self._tracked_box["h"] + 0.30 * rh
-
-                    # Check drift between optical flow and worker detection
-                    drift = np.hypot(self._tracked_box["x"] - rx, self._tracked_box["y"] - ry)
-                    if drift > 50.0:
-                        alpha_anchor = min(0.60, drift / 100.0)
-                        self._tracked_box["x"] = (1.0 - alpha_anchor) * self._tracked_box["x"] + alpha_anchor * rx
-                        self._tracked_box["y"] = (1.0 - alpha_anchor) * self._tracked_box["y"] + alpha_anchor * ry
-                    else:
-                        # Subtle stabilization
-                        self._tracked_box["x"] = 0.88 * self._tracked_box["x"] + 0.12 * rx
-                        self._tracked_box["y"] = 0.88 * self._tracked_box["y"] + 0.12 * ry
-
-                # Gracefully expire tracked box if worker has lost face for > 15 frames (~500ms)
-                if self._missing_worker_frames > 15:
-                    self._tracked_box = None
-
-            self._prev_gray = curr_gray
-
-            display_box = None
-            if self._tracked_box is not None:
-                frame_h, frame_w = bgr.shape[:2]
-                tx = int(round(max(0.0, min(float(frame_w - 10), self._tracked_box["x"]))))
-                ty = int(round(max(0.0, min(float(frame_h - 10), self._tracked_box["y"]))))
-                tw = int(round(max(10.0, min(float(frame_w - tx), self._tracked_box["w"]))))
-                th = int(round(max(10.0, min(float(frame_h - ty), self._tracked_box["h"]))))
-                display_box = {"x": tx, "y": ty, "w": tw, "h": th}
-
-            # Draw sleek aerospace glass HUD using latest cached telemetry and real-time tracked box
             try:
-                bgr = _draw_aerospace_hud(bgr, ls, display_box=display_box)
+                self._inference_queue.put_nowait(bgr.copy())
+            except queue.Full:
+                pass
+
+            # Draw sleek aerospace glass HUD using latest cached telemetry
+            try:
+                bgr = _draw_aerospace_hud(bgr, ls)
             except Exception:
                 pass
 
