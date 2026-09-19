@@ -153,7 +153,7 @@ angry_sig = (0.40 * np.sin(2*np.pi*250*angry_t) + 0.20 * np.sin(2*np.pi*500*angr
 dom, probs, conf, qual, is_spk = predict_voice_emotion(angry_sig, sampling_rate=SR)
 print(f"  ? High-energy  → dom='{dom}', conf={conf:.2f} (expected angry/disgust/fear)", flush=True)
 
-# 4. Low-energy monotone speech (sad pattern)
+# 5. Low-energy monotone speech (sad pattern)
 sad_t = np.linspace(0, 2.0, SR * 2, dtype=np.float32)
 sad_sig = (0.08 * np.sin(2*np.pi*120*sad_t)).astype(np.float32)
 dom, probs, conf, qual, is_spk = predict_voice_emotion(sad_sig, sampling_rate=SR)

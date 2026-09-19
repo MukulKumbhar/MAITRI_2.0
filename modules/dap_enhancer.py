@@ -363,6 +363,14 @@ def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) ->
     """
     Computes additive logit calibration priors matching model classes:
     [0: angry, 1: neutral, 2: disgust, 3: fear, 4: happy, 5: sad, 6: surprise]
+
+    - Cheerful voice (expressive pitch spread or bright intonation):
+      Boosts 'happy' (+2.0 to +5.0) and dampens unvoiced 'sad' sink logit.
+    - Laughter cadence (rhythmic staccato bursts R_env >= 0.35, mod_depth >= 0.40):
+      Boosts 'happy' (+3.0) and dampens 'sad' (-2.0).
+    - Somber voice (voiced speech with flat low pitch σ(F0) < 15 Hz, centroid < 1200 Hz,
+      and strictly non-rhythmic R_env < 0.25, mod_depth < 0.40):
+      Boosts 'sad' (+2.0) and dampens 'happy'.
     """
     prior = np.zeros(7, dtype=np.float32)
     if dap is None:
@@ -457,4 +465,5 @@ def calibrate_logits(
         cal_logits = cal_logits + prior
 
     return cal_logits.astype(np.float32)
+
 
