@@ -17,6 +17,12 @@ class LiveState:
     the Streamlit main thread.  All access must go through the lock.
     """
     lock: threading.Lock = field(default_factory=threading.Lock)
+    face_lock: threading.Lock = field(default_factory=threading.Lock)
+    voice_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        # Alias lock to face_lock for backward compatibility
+        self.lock = self.face_lock
 
     # Face
     face_emotion:    str                    = "neutral"
@@ -59,9 +65,9 @@ class LiveState:
     # Frame counter (for throttling heavy models)
     frame_count:     int                    = 0
 
-    def snapshot(self) -> dict:
-        """Return a plain dict copy — safe to read from main thread."""
-        with self.lock:
+    def snapshot_face(self) -> dict:
+        """Return face, eye, and video telemetry under face_lock (<0.05ms)."""
+        with self.face_lock:
             return {
                 "face_emotion":     self.face_emotion,
                 "emotion_probs":    dict(self.emotion_probs),
@@ -78,6 +84,13 @@ class LiveState:
                 "is_blurry":        self.is_blurry,
                 "dip_active":       self.dip_active,
                 "face_box":         dict(self.face_box) if self.face_box else None,
+                "frame_count":      self.frame_count,
+            }
+
+    def snapshot_voice(self) -> dict:
+        """Return voice telemetry under voice_lock (<0.05ms)."""
+        with self.voice_lock:
+            return {
                 "voice_emotion":    self.voice_emotion,
                 "voice_probs":      dict(self.voice_probs),
                 "voice_confidence": self.voice_confidence,
@@ -85,6 +98,11 @@ class LiveState:
                 "is_speaking":      self.is_speaking,
                 "voice_available":  self.voice_available,
                 "voice_rms":        self.voice_rms,
-                "frame_count":      self.frame_count,
             }
+
+    def snapshot(self) -> dict:
+        """Return a plain dict copy of all telemetry — safe to read from main thread."""
+        snap = self.snapshot_face()
+        snap.update(self.snapshot_voice())
+        return snap
 

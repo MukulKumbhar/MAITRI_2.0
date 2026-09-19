@@ -154,7 +154,8 @@ class MAITRIVideoProcessor:
             try:
                 face_res, eye_res = process_unified_frame(bgr, self.eye_state)
                 ls = self.live_state
-                with ls.lock:
+                f_lock = getattr(ls, "face_lock", ls.lock)
+                with f_lock:
                     if face_res is not None:
                         ls.face_emotion    = face_res.dominant_emotion
                         ls.emotion_probs   = {
@@ -187,23 +188,26 @@ class MAITRIVideoProcessor:
             bgr = frame.to_ndarray(format="bgr24")
             ls  = self.live_state
 
-            with ls.lock:
+            # Update frame count under face_lock exclusively
+            f_lock = getattr(ls, "face_lock", ls.lock)
+            with f_lock:
                 ls.frame_count += 1
 
-            # Non-blocking dispatch to unified worker — evict stale frame if full to keep freshest input
+            # Non-blocking single-copy dispatch to unified worker
+            frame_copy = bgr.copy()
             try:
-                self._inference_queue.put_nowait(bgr.copy())
+                self._inference_queue.put_nowait(frame_copy)
             except queue.Full:
                 try:
                     self._inference_queue.get_nowait()
                 except queue.Empty:
                     pass
                 try:
-                    self._inference_queue.put_nowait(bgr.copy())
+                    self._inference_queue.put_nowait(frame_copy)
                 except queue.Full:
                     pass
 
-            # Draw sleek aerospace glass HUD using latest cached telemetry
+            # Draw sleek aerospace glass HUD using latest cached face telemetry (NO voice)
             try:
                 bgr = _draw_aerospace_hud(bgr, ls)
             except Exception:
@@ -246,7 +250,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     - Bottom banner: Eye EAR, blink rate, fatigue state, dynamic non-overlapping mission tag
     - Face reticle: Corner-bracket tactical targeting reticle with zero collision
     """
-    snap = ls.snapshot()
+    snap = ls.snapshot_face() if hasattr(ls, "snapshot_face") else ls.snapshot()
     h, w = bgr.shape[:2]
 
     # 1. Semi-transparent top aerospace banner slice (42px)
@@ -346,8 +350,8 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
         cv2.putText(bgr, telem_text, (x_telem, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, clarity_col, 1, cv2.LINE_AA)
 
-    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Mic & Mission Status)
-    fatigue = snap["fatigue_label"]
+    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Astronaut Vision Tag)
+    fatigue = snap.get("fatigue_label", "Normal")
     fatigue_col = {
         "Normal":        (0, 230, 118),
         "Drowsy":        (0, 70, 240),
@@ -355,48 +359,23 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
         "Hyperfocused":  (0, 215, 255),
     }.get(fatigue, (180, 180, 180))
 
-    eye_text = f"EAR: {snap['ear']:.2f}   BLINK: {snap['blink_rate']:.0f}/min   FATIGUE: {fatigue.upper()}"
-    # Tactical Real-Time VU Meter directly on the live video stream (30 FPS native, zero Streamlit latency)
-    rms    = snap.get("voice_rms", 0.0)
-    is_spk = snap.get("is_speaking", False)
-
-    meter_w = 85
-    meter_h = 10
-    meter_x = w - meter_w - 14
-    meter_y = h - 23
-
-    # Draw meter background box
-    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (18, 24, 34), -1)
-    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (70, 95, 125), 1)
-
-    # Dynamic fill calculation: calibrated -45 dB ambient floor to 0 dB peak
-    eff_rms = max(0.001, rms)
-    db_val = max(-50.0, min(0.0, 20.0 * np.log10(eff_rms)))
-    hud_pct = min(1.0, max(0.0, (db_val + 45.0) / 45.0))
-
-    fill_w = int(meter_w * hud_pct)
-    if fill_w > 0:
-        vu_col = (0, 230, 118) if hud_pct < 0.55 else (0, 215, 255) if hud_pct < 0.80 else (50, 50, 255)
-        cv2.rectangle(bgr, (meter_x + 1, meter_y + 1), (meter_x + fill_w, meter_y + meter_h - 1), vu_col, -1)
-
-    # Mic status tag next to the meter
-    if is_spk:
-        v_emo = snap.get("voice_emotion", "neutral").upper()
-        v_conf = snap.get("voice_confidence", 0.0) * 100.0
-        mission_tag = f"MIC: {v_emo} {v_conf:.0f}%"
-        tag_col = (0, 230, 118)
-    else:
-        mission_tag = "MIC [IDLE]"
-        tag_col = (130, 145, 160)
-
-    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-    tag_x = meter_x - tw_tag - 8
-    cv2.putText(bgr, mission_tag, (tag_x, h - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, tag_col, 1, cv2.LINE_AA)
+    eye_text = f"EAR: {snap.get('ear', 0.30):.2f}   BLINK: {snap.get('blink_rate', 0.0):.0f}/min   FATIGUE: {fatigue.upper()}"
+    mission_tag = "MAITRI 2.0 // ASTRONAUT VISION"
 
     (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+    x_tag = w - tw_tag - 14
+
+    if 14 + tw_eye + 16 > x_tag:
+        mission_tag = "MAITRI 2.0"
+        (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        x_tag = w - tw_tag - 14
+
     cv2.putText(bgr, eye_text, (14, h - 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, fatigue_col, 1, cv2.LINE_AA)
+    if 14 + tw_eye + 12 <= x_tag:
+        cv2.putText(bgr, mission_tag, (x_tag, h - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
 
     return bgr
 
@@ -417,26 +396,115 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────
 # LIVE TELEMETRY FRAGMENTS (Smooth 1 Hz Refresh Without UI Lock)
 # ─────────────────────────────────────────────────────────────────────────
-def _render_dip_status(is_playing: bool):
-    if is_playing:
-        snap_v = st.session_state.live_state.snapshot()
-        blur_status = (
-            "<span style='color:#f39c12;'>⚠️ Motion Blur (Fusion Gated)</span>"
-            if snap_v["is_blurry"]
-            else f"<span style='color:#2ecc71;'>✅ Sharp ({snap_v['blur_score']:.0f})</span>"
-        )
+@st.fragment(run_every=1.0)
+def _render_face_telemetry(is_playing: bool):
+    ls = st.session_state.live_state
+    snap_f = ls.snapshot_face() if hasattr(ls, "snapshot_face") else ls.snapshot()
+    f_emo   = str(snap_f.get("face_emotion", "neutral")).lower()
+    f_conf  = float(snap_f.get("face_confidence", 0.0))
+    f_probs = dict(snap_f.get("emotion_probs", {}))
+    f_box   = snap_f.get("face_box")
+    is_blur = bool(snap_f.get("is_blurry", False))
+    blur_sc = float(snap_f.get("blur_score", 100.0))
+
+    if not is_playing:
         st.markdown(
-            f"<div style='background:#1b2838;padding:8px 12px;border-radius:6px;font-size:0.83rem;margin-top:6px;border:1px solid #2a475e;'>"
-            f"🛡️ <b>Vision Pipeline:</b> Hybrid FACS (AU12/AU6) + EfficientNet ONNX (Isotropic Square Crop) &nbsp;|&nbsp; "
-            f"<b>Clarity:</b> {blur_status}"
+            """
+            <div style="background:#161d2b; border:2px solid #2a384c; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#60718b; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:#8b9cb5; margin-top:2px;">📷 CAMERA STANDBY</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#78889e; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
+                  IDLE
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    theme_col = EMO_COLORS.get(f_emo, "#00e676")
+    has_face  = (f_box is not None or f_conf > 0.10)
+
+    # 1. Instant Face Emotion Badge
+    if has_face:
+        st.markdown(
+            f"""
+            <div style="background:{theme_col}18; border:2px solid {theme_col}; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#8b9cb5; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:{theme_col}; margin-top:2px;">😊 {f_emo.upper()} ({f_conf*100:.0f}%)</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#13381e; color:#00e676; font-size:0.75rem; font-weight:600; border:1px solid #00e67655; box-shadow:0 0 8px #00e67644;">
+                  🎯 FACE LOCKED
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="background:#161d2b; border:2px solid #2a384c; border-radius:10px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <div style="font-size:0.72rem; color:#60718b; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Instant Face Emotion</div>
+                <div style="font-size:1.35rem; font-weight:bold; color:#8b9cb5; margin-top:2px;">🔍 SCANNING ASTRONAUT...</div>
+              </div>
+              <div style="text-align:right;">
+                <span style="display:inline-block; padding:4px 10px; border-radius:12px; background:#1e2638; color:#78889e; font-size:0.75rem; font-weight:600; border:1px solid #33425b;">
+                  SEARCHING
+                </span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 2. Face Emotion Distribution (7-Class FER)
+    st.markdown("<div style='font-size:0.83rem;font-weight:600;margin-bottom:4px;'>Face Emotion Distribution (7-Class FER)</div>", unsafe_allow_html=True)
+    sorted_f = sorted(f_probs.items(), key=lambda x: x[1], reverse=True)
+    for emo, prob in sorted_f:
+        pct = round(prob * 100, 1)
+        bar_w = max(pct, 1)
+        bar_color = EMO_COLORS.get(emo, "#888")
+        marker = " ◀" if (f_conf > 0.0 and emo == f_emo) else ""
+        st.markdown(
+            f"<div class='emo-row'>"
+            f"<span class='emo-label'>{emo}</span>"
+            f"<div class='emo-bar-bg'>"
+            f"<div class='emo-bar' style='width:{bar_w}%;background:{bar_color};'></div>"
+            f"</div>"
+            f"<span class='emo-pct'>{pct:.1f}%{marker}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
 
+    # 3. Vision Pipeline & Clarity Telemetry
+    blur_status = (
+        "<span style='color:#f39c12;'>⚠️ Motion Blur (Gated)</span>"
+        if is_blur
+        else f"<span style='color:#2ecc71;'>✅ Sharp ({blur_sc:.0f})</span>"
+    )
+    st.markdown(
+        f"""
+        <div style="background:#1b2838; padding:8px 12px; border-radius:6px; font-size:0.83rem; margin-top:8px; border:1px solid #2a475e; display:flex; justify-content:space-between; align-items:center;">
+          <span>🛡️ <b>Vision Pipeline:</b> Hybrid FACS (AU12/AU6) + EfficientNet ONNX</span>
+          <span><b>Clarity:</b> {blur_status}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 @st.fragment(run_every=1.0)
 def _render_live_voice_telemetry(is_playing: bool):
-    ls_snap = st.session_state.live_state.snapshot()
+    ls = st.session_state.live_state
+    ls_snap = ls.snapshot_voice() if hasattr(ls, "snapshot_voice") else ls.snapshot()
     rms_val = float(ls_snap.get("voice_rms", 0.0))
     is_spk  = bool(ls_snap.get("is_speaking", False))
     v_emo   = str(ls_snap.get("voice_emotion", "neutral")).lower()
@@ -777,7 +845,7 @@ with tab_live:
             async_processing=True,
         )
 
-        _render_dip_status(ctx.state.playing)
+        _render_face_telemetry(ctx.state.playing)
 
     with col_voice:
         st.subheader("🎙️ Voice Emotion & Acoustic Telemetry")

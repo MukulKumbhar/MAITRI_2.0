@@ -590,7 +590,8 @@ class VoiceDetector:
                     self._speech_ended_pending = True
 
         if self.live_state is not None:
-            with self.live_state.lock:
+            v_lock = getattr(self.live_state, "voice_lock", self.live_state.lock)
+            with v_lock:
                 self.live_state.voice_available = True
 
     def _audio_callback(self, indata, frames, time_info, status):
@@ -706,7 +707,8 @@ class VoiceDetector:
 
                             if spk_ok and self.live_state is not None:
                                 ls = self.live_state
-                                with ls.lock:
+                                v_lock = getattr(ls, "voice_lock", ls.lock)
+                                with v_lock:
                                     ls.voice_emotion    = new_dom
                                     ls.voice_probs      = dict(smoothed_probs)
                                     ls.voice_confidence = new_conf
@@ -730,7 +732,8 @@ class VoiceDetector:
 
                 if self.live_state is not None:
                     ls = self.live_state
-                    with ls.lock:
+                    v_lock = getattr(ls, "voice_lock", ls.lock)
+                    with v_lock:
                         ls.is_speaking     = is_spk
                         ls.voice_rms       = rms
                         ls.voice_available = True
@@ -808,7 +811,8 @@ class VoiceDetector:
             self.voice_available = False
 
         if self.live_state is not None:
-            with self.live_state.lock:
+            v_lock = getattr(self.live_state, "voice_lock", self.live_state.lock)
+            with v_lock:
                 self.live_state.voice_available = self.voice_available
 
         self._worker_thread = threading.Thread(
