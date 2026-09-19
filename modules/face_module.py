@@ -93,10 +93,10 @@ def _get_onnx_session():
         _onnx_init_attempted = True
 
         candidate_paths = [
-            os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
             os.path.join(_MODELS_DIR, "enet_b2_7.onnx"),
-            os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
+            os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
             os.path.expanduser("~/.hsemotion/enet_b2_7.onnx"),
+            os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
         ]
 
         found_path = None
@@ -117,7 +117,7 @@ def _get_onnx_session():
         try:
             import onnxruntime as ort
             sess_opts = ort.SessionOptions()
-            sess_opts.intra_op_num_threads = min(4, os.cpu_count() or 4)
+            sess_opts.intra_op_num_threads = min(6, os.cpu_count() or 6)
             sess_opts.inter_op_num_threads = 1
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
