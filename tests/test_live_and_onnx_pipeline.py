@@ -225,6 +225,77 @@ class TestLiveAndONNXPipeline(unittest.TestCase):
                 gap_top = x_telem - (14 + tw_status)
                 self.assertGreaterEqual(gap_top, 10, f"Overlap in top banner at {w}x{h}: gap={gap_top}px")
 
+    def test_08_motion_rotation_and_tilt_tracking(self):
+        """Verify robust face tracking across rapid pitch/yaw/roll rotations (-45° to +45°)."""
+        if not os.path.isfile(self.test_face_path):
+            self.skipTest("test_face.jpg not available")
+
+        img_bgr = cv2.imread(self.test_face_path)
+        h, w = img_bgr.shape[:2]
+        session = EyeSessionState()
+
+        # Warmup
+        process_unified_frame(img_bgr, session)
+
+        for angle in [-45, -30, -15, 15, 30, 45]:
+            M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+            rotated = cv2.warpAffine(img_bgr, M, (w, h))
+
+            t0 = time.perf_counter()
+            face_res, eye_res = process_unified_frame(rotated, session)
+            lat_ms = (time.perf_counter() - t0) * 1000.0
+
+            self.assertIsNotNone(face_res.face_box, f"Face tracking lost at rotation angle {angle}°")
+            self.assertIn(face_res.dominant_emotion, ["neutral", "happy", "surprise", "sad", "angry", "fear", "disgust"])
+            self.assertLess(lat_ms, 50.0, f"Latency at {angle}° was {lat_ms:.2f}ms (>50ms)")
+
+    def test_09_transient_coasting_and_reticle_interpolation(self):
+        """Verify coasting on transient frame drop and smooth reticle tracking in VideoProcessor."""
+        if not os.path.isfile(self.test_face_path):
+            self.skipTest("test_face.jpg not available")
+
+        img_bgr = cv2.imread(self.test_face_path)
+        h, w = img_bgr.shape[:2]
+        session = EyeSessionState()
+
+        # 1. Establish tracking
+        f_init, _ = process_unified_frame(img_bgr, session)
+        self.assertIsNotNone(f_init.face_box)
+
+        # 2. Feed blank frame (simulating momentary occlusion/extreme blur)
+        blank = np.zeros((h, w, 3), dtype=np.uint8)
+        f_coast, e_coast = process_unified_frame(blank, session)
+
+        # Coasting must preserve bounding box and avoid resetting to no_face
+        self.assertEqual(f_coast.method, "motion_tracking_coasting")
+        self.assertIsNotNone(f_coast.face_box)
+        self.assertAlmostEqual(f_coast.face_box["x"], f_init.face_box["x"], delta=2)
+        self.assertTrue(e_coast.available)
+
+        # 3. VideoProcessor recv() motion-adaptive reticle tracking benchmark
+        import av
+        from app import MAITRIVideoProcessor
+        ls = LiveState()
+        ls.face_box = {"x": 200, "y": 150, "w": 180, "h": 180}
+        vp = MAITRIVideoProcessor(ls, session)
+
+        av_frame = av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+        # Warmup
+        for _ in range(5):
+            vp.recv(av_frame)
+
+        # Benchmark 20 frames under rapid movement
+        recv_times = []
+        for i in range(20):
+            ls.face_box = {"x": 200 + i * 5, "y": 150, "w": 180, "h": 180}
+            t0 = time.perf_counter()
+            out_frame = vp.recv(av_frame)
+            recv_times.append((time.perf_counter() - t0) * 1000.0)
+
+        vp.stop()
+        avg_recv = float(np.mean(recv_times))
+        self.assertLess(avg_recv, 5.0, f"Average recv latency under motion {avg_recv:.2f}ms exceeds 5ms limit")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -11,6 +11,7 @@ import time
 import av
 import cv2
 import numpy as np
+from typing import Optional
 import streamlit as st
 
 # ── Pure-Python project modules (safe to import at startup) ───────────────
@@ -255,6 +256,14 @@ class MAITRIVideoProcessor:
         # Single-slot queue — drops frames when background worker is busy (zero lag)
         self._inference_queue: queue.Queue = queue.Queue(maxsize=1)
 
+        # Motion-aware adaptive reticle tracking state
+        self._current_display_box: Optional[dict] = None
+        self._last_raw_box: Optional[dict] = None
+        self._vel_x: float = 0.0
+        self._vel_y: float = 0.0
+        self._vel_w: float = 0.0
+        self._vel_h: float = 0.0
+
         # Unified background worker
         self._worker = threading.Thread(
             target=self._unified_inference_worker, daemon=True, name="maitri-unified-worker"
@@ -334,9 +343,75 @@ class MAITRIVideoProcessor:
                 except queue.Full:
                     pass
 
-            # Draw sleek aerospace glass HUD using latest cached telemetry
+            # Motion-adaptive reticle tracking & lead-prediction
+            snap = ls.snapshot_face_nonblocking() if hasattr(ls, "snapshot_face_nonblocking") else ls.snapshot_face()
+            raw_box = snap.get("face_box")
+
+            display_box = None
+            if raw_box is not None:
+                rx, ry = float(raw_box["x"]), float(raw_box["y"])
+                rw, rh = float(raw_box["w"]), float(raw_box["h"])
+
+                if self._current_display_box is None:
+                    self._current_display_box = {
+                        "x": rx, "y": ry, "w": rw, "h": rh,
+                    }
+                    self._vel_x = 0.0
+                    self._vel_y = 0.0
+                    self._vel_w = 0.0
+                    self._vel_h = 0.0
+                elif raw_box != self._last_raw_box:
+                    # New detection from worker: calculate instantaneous velocity
+                    lx, ly = float(self._last_raw_box["x"]), float(self._last_raw_box["y"])
+                    lw, lh = float(self._last_raw_box["w"]), float(self._last_raw_box["h"])
+                    inst_vx = rx - lx
+                    inst_vy = ry - ly
+                    inst_vw = rw - lw
+                    inst_vh = rh - lh
+
+                    # Velocity filter
+                    self._vel_x = 0.60 * self._vel_x + 0.40 * inst_vx
+                    self._vel_y = 0.60 * self._vel_y + 0.40 * inst_vy
+                    self._vel_w = 0.60 * self._vel_w + 0.40 * inst_vw
+                    self._vel_h = 0.60 * self._vel_h + 0.40 * inst_vh
+
+                self._last_raw_box = raw_box
+
+                # Dynamic responsiveness: fast tracking during motion, zero jitter when resting
+                speed = abs(self._vel_x) + abs(self._vel_y)
+                alpha = min(0.90, max(0.45, 0.45 + speed * 0.02))
+
+                # Lead compensation for 1-frame asynchronous pipeline delay
+                target_x = rx + self._vel_x * 0.45
+                target_y = ry + self._vel_y * 0.45
+                target_w = rw + self._vel_w * 0.20
+                target_h = rh + self._vel_h * 0.20
+
+                cb = self._current_display_box
+                cb["x"] = alpha * target_x + (1.0 - alpha) * cb["x"]
+                cb["y"] = alpha * target_y + (1.0 - alpha) * cb["y"]
+                cb["w"] = alpha * target_w + (1.0 - alpha) * cb["w"]
+                cb["h"] = alpha * target_h + (1.0 - alpha) * cb["h"]
+
+                # Friction decay between background updates
+                self._vel_x *= 0.88
+                self._vel_y *= 0.88
+                self._vel_w *= 0.88
+                self._vel_h *= 0.88
+
+                display_box = {
+                    "x": int(round(cb["x"])),
+                    "y": int(round(cb["y"])),
+                    "w": int(round(cb["w"])),
+                    "h": int(round(cb["h"])),
+                }
+            else:
+                self._current_display_box = None
+                self._last_raw_box = None
+
+            # Draw sleek aerospace glass HUD using latest cached telemetry and smooth tracked box
             try:
-                bgr = _draw_aerospace_hud(bgr, ls)
+                bgr = _draw_aerospace_hud(bgr, ls, display_box=display_box)
             except Exception:
                 pass
 
@@ -379,7 +454,7 @@ def _get_hud_bg_slice(slice_h: int, slice_w: int) -> np.ndarray:
     return arr
 
 
-def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
+def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState, display_box: Optional[dict] = None) -> np.ndarray:
     """
     Sleek, high-contrast semi-transparent aerospace glass HUD:
     - Slice-based in-place alpha blending (no full frame copy, 12x lower rendering overhead)
@@ -406,7 +481,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     cv2.line(bgr, (0, y_bot), (w, y_bot), (60, 80, 110), 1)
 
     # 3. Corner-bracket face reticle
-    box = snap.get("face_box")
+    box = display_box if display_box is not None else snap.get("face_box")
     emo = snap.get("face_emotion", "neutral").upper()
     conf = snap.get("face_confidence", 0.0) * 100.0
     is_blurry = snap.get("is_blurry", False)

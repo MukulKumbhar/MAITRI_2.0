@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -75,6 +75,11 @@ class EyeSessionState:
     face_ema_probs:      Optional[dict] = None
     face_dominant:       Optional[str]  = None
     face_conf:           float = 0.0
+    # ── Motion Tracking & Coasting ───────────────────────────────────────
+    consecutive_missing: int = 0
+    last_face_box:       Optional[dict] = None
+    last_face_res:       Optional[Any]  = None
+    last_eye_res:        Optional[Any]  = None
 
 
 @dataclass
@@ -125,8 +130,8 @@ def _get_landmarker():
                 base_options=mp_python.BaseOptions(model_asset_path=_MODEL_PATH),
                 running_mode=mp_vision.RunningMode.IMAGE,
                 num_faces=1,
-                min_face_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_face_detection_confidence=0.3,
+                min_tracking_confidence=0.3,
                 output_face_blendshapes=True,
                 output_facial_transformation_matrixes=False,
             )
