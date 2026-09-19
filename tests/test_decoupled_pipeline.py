@@ -93,6 +93,10 @@ class TestDecoupledPipeline(unittest.TestCase):
         ls.face_box = {"x": 120, "y": 80, "w": 200, "h": 200}
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
+        # Warmup
+        for _ in range(5):
+            _draw_aerospace_hud(frame.copy(), ls)
+
         # Benchmark 50 runs
         times = []
         for _ in range(50):

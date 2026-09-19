@@ -71,6 +71,10 @@ class EyeSessionState:
     baseline_ear:        float = 0.0      # 0.0 = not yet calibrated
     is_calibrated:       bool  = False
     session_start_time:  float = field(default_factory=time.time)
+    # ── Temporal Face Emotion Smoothing ──────────────────────────────────
+    face_ema_probs:      Optional[dict] = None
+    face_dominant:       Optional[str]  = None
+    face_conf:           float = 0.0
 
 
 @dataclass

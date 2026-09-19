@@ -64,6 +64,35 @@ class LiveState:
 
     # Frame counter (for throttling heavy models)
     frame_count:     int                    = 0
+    _cached_face_snap: Optional[dict]       = None
+
+    def snapshot_face_nonblocking(self) -> dict:
+        """Non-blocking snapshot for 30 FPS video thread (zero lock wait)."""
+        if self.face_lock.acquire(blocking=False):
+            try:
+                self._cached_face_snap = {
+                    "face_emotion":     self.face_emotion,
+                    "emotion_probs":    dict(self.emotion_probs),
+                    "face_confidence":  self.face_confidence,
+                    "face_quality":     self.face_quality,
+                    "face_error":       self.face_error,
+                    "ear":              self.ear,
+                    "blink_rate":       self.blink_rate,
+                    "fatigue_label":    self.fatigue_label,
+                    "fatigue_strain":   self.fatigue_strain,
+                    "eye_quality":      self.eye_quality,
+                    "eye_available":    self.eye_available,
+                    "blur_score":       self.blur_score,
+                    "is_blurry":        self.is_blurry,
+                    "dip_active":       self.dip_active,
+                    "face_box":         dict(self.face_box) if self.face_box else None,
+                    "frame_count":      self.frame_count,
+                }
+            finally:
+                self.face_lock.release()
+        if self._cached_face_snap is not None:
+            return dict(self._cached_face_snap)
+        return self.snapshot_face()
 
     def snapshot_face(self) -> dict:
         """Return face, eye, and video telemetry under face_lock (<0.05ms)."""

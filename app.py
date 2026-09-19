@@ -29,8 +29,42 @@ try:
     _WEBRTC_OK = True
 
     # ── Rock-Solid WebRTC Lifecycle & Worker Hardening ─────────────────────────
-    # 1. Prevent aiortc from aborting stream on transient ICE "disconnected" state
-    #    (e.g., 5s consent check jitter under CPU load or STUN delay).
+    # 0. Suppress aioice STUN retry crashes on dead/closed UDP transports
+    try:
+        import aioice.ice
+        import aioice.stun
+        _orig_stun_retry = getattr(aioice.stun.Transaction, "_Transaction__retry", None)
+        if _orig_stun_retry:
+            def _safe_stun_retry(self):
+                try:
+                    fut = getattr(self, "_Transaction__future", None)
+                    if fut and fut.done():
+                        return
+                    proto = getattr(self, "_Transaction__protocol", None)
+                    if proto:
+                        tr = getattr(proto, "transport", None)
+                        if tr is None or getattr(tr, "_sock", None) is None or (hasattr(tr, "is_closing") and tr.is_closing()):
+                            return
+                    _orig_stun_retry(self)
+                except Exception:
+                    pass
+            aioice.stun.Transaction._Transaction__retry = _safe_stun_retry
+
+        _orig_ice_send_stun = getattr(aioice.ice.StunProtocol, "send_stun", None)
+        if _orig_ice_send_stun:
+            def _safe_ice_send_stun(self, message, addr):
+                if self.transport is None or getattr(self.transport, "_sock", None) is None or (hasattr(self.transport, "is_closing") and self.transport.is_closing()):
+                    return
+                try:
+                    _orig_ice_send_stun(self, message, addr)
+                except Exception:
+                    pass
+            aioice.ice.StunProtocol.send_stun = _safe_ice_send_stun
+    except Exception:
+        pass
+
+    # 1. Prevent aiortc from aborting stream on transient ICE "disconnected" / "failed" states
+    #    (e.g., 5s STUN consent check timeouts under CPU load or firewall NAT).
     try:
         from aiortc import RTCPeerConnection
         _orig_listens_to = RTCPeerConnection.listens_to
@@ -40,8 +74,8 @@ try:
                 def wrapped_decorator(handler):
                     async def wrapped_handler(*args, **kwargs):
                         state = getattr(self, "iceConnectionState", None)
-                        if state == "disconnected":
-                            return  # Suppress transient disconnect; keep stream running
+                        if state in ("disconnected", "failed"):
+                            return  # Suppress transient ICE disconnects; keep stream running
                         return await handler(*args, **kwargs)
                     return decorator(wrapped_handler)
                 return wrapped_decorator
@@ -50,36 +84,70 @@ try:
     except Exception:
         pass
 
-    # 2. Prevent Streamlit reruns / widget interactions from losing the WebRTC component value
-    _orig_restore_snapshot = _st_webrtc_comp._restore_snapshot_if_needed
-    def _hardened_restore_snapshot(context, component_value):
-        worker = context._get_worker() if hasattr(context, "_get_worker") else None
-        is_active = (
-            (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
-            or getattr(context.state, "playing", False)
-            or getattr(context.state, "signalling", False)
-        )
-        if component_value is None and is_active:
-            snap = getattr(context, "_component_value_snapshot", None)
-            if snap is not None and snap.component_value is not None:
-                component_value = snap.component_value
+    # 2. Prevent worker from being garbage-collected during active sessions
+    _orig_set_worker = _st_webrtc_comp.WebRtcStreamerContext._set_worker
+    def _hardened_set_worker(self, worker):
+        self._strong_worker = worker  # Prevent GC reaping
+        _orig_set_worker(self, worker)
+    _st_webrtc_comp.WebRtcStreamerContext._set_worker = _hardened_set_worker
 
-        val = _orig_restore_snapshot(context, component_value)
-        if val is None and is_active:
-            snap = getattr(context, "_component_value_snapshot", None)
-            if snap is not None and snap.component_value is not None:
-                val = snap.component_value
-        return val
+    # 3. Guard _reset_context from killing an active connected peer connection
+    _orig_reset_context = _st_webrtc_comp._reset_context
+    def _hardened_reset_context(context):
+        worker = context._get_worker() if hasattr(context, "_get_worker") else None
+        pc = getattr(worker, "pc", None)
+        if (
+            worker
+            and pc
+            and pc.connectionState == "connected"
+            and not getattr(context, "_user_stopped", False)
+        ):
+            context._set_state(_st_webrtc_comp.WebRtcStreamerState(playing=True, signalling=False))
+            return
+        _orig_reset_context(context)
+    _st_webrtc_comp._reset_context = _hardened_reset_context
+
+    # 4. Prevent Streamlit reruns / fragments from wiping the WebRTC component value
+    def _hardened_restore_snapshot(context, component_value):
+        session_info = _st_webrtc_comp.get_this_session_info()
+        run_count = _st_webrtc_comp.get_script_run_count(session_info) if session_info else 0
+        worker = context._get_worker() if hasattr(context, "_get_worker") else None
+        pc = getattr(worker, "pc", None)
+        pc_connected = (
+            worker is not None
+            and pc is not None
+            and getattr(pc, "connectionState", None) in ("connected", "connecting")
+        )
+
+        if component_value is not None:
+            if component_value.get("playing") is False:
+                context._user_stopped = True
+                context._last_valid_component_value = None
+            elif component_value.get("playing") is True:
+                context._user_stopped = False
+                context._last_valid_component_value = component_value
+
+        if (component_value is None or not component_value.get("playing")) and not getattr(context, "_user_stopped", False):
+            cached = getattr(context, "_last_valid_component_value", None)
+            if cached is not None and (pc_connected or getattr(context.state, "playing", False)):
+                component_value = cached
+
+        if run_count is not None:
+            context._component_value_snapshot = _st_webrtc_comp.ComponentValueSnapshot(
+                component_value=component_value, run_count=run_count
+            )
+        return component_value
     _st_webrtc_comp._restore_snapshot_if_needed = _hardened_restore_snapshot
 
-    # 3. Prevent orphan context cleanup from killing an active streaming session
+    # 5. Prevent orphan context cleanup from killing an active streaming session
     _orig_get_or_create_context = _st_webrtc_comp._get_or_create_context
     def _hardened_get_or_create_context(key: str):
         if key in st.session_state:
             ctx = st.session_state[key]
             worker = ctx._get_worker() if hasattr(ctx, "_get_worker") else None
+            pc = getattr(worker, "pc", None)
             is_active = (
-                (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
+                (worker is not None and pc is not None and getattr(pc, "connectionState", None) not in ("closed", "failed"))
                 or getattr(ctx.state, "playing", False)
                 or getattr(ctx.state, "signalling", False)
             )
@@ -140,10 +208,8 @@ if "eye_state"    not in st.session_state:
     from modules.eye_module import EyeSessionState
     st.session_state.eye_state    = EyeSessionState()
 if "voice_detector" not in st.session_state:
-    from modules.voice_module import VoiceDetector
-    _detector = VoiceDetector(st.session_state.live_state)
-    _detector.start()
-    st.session_state.voice_detector = _detector
+    from modules.voice_module import get_or_create_voice_detector
+    st.session_state.voice_detector = get_or_create_voice_detector(st.session_state.live_state)
 
 # Global references safe for background threads (aiortc workers cannot access st.session_state)
 _ACTIVE_LIVE_STATE = st.session_state.live_state
@@ -252,8 +318,7 @@ class MAITRIVideoProcessor:
             bgr = frame.to_ndarray(format="bgr24")
             ls  = self.live_state
 
-            with ls.lock:
-                ls.frame_count += 1
+            ls.frame_count += 1
 
             # Non-blocking single-copy dispatch to unified worker
             frame_copy = bgr.copy()
@@ -304,21 +369,31 @@ def _make_video_processor() -> MAITRIVideoProcessor:
     return MAITRIVideoProcessor(ls, es)
 
 
+_HUD_BG_CACHE = {}
+def _get_hud_bg_slice(slice_h: int, slice_w: int) -> np.ndarray:
+    key = (slice_h, slice_w)
+    arr = _HUD_BG_CACHE.get(key)
+    if arr is None or arr.shape != (slice_h, slice_w, 3):
+        arr = np.full((slice_h, slice_w, 3), (12, 16, 24), dtype=np.uint8)
+        _HUD_BG_CACHE[key] = arr
+    return arr
+
+
 def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     """
     Sleek, high-contrast semi-transparent aerospace glass HUD:
     - Slice-based in-place alpha blending (no full frame copy, 12x lower rendering overhead)
     - Top banner: System status, emotion badge with color indicator, confidence %, passive clarity
-    - Bottom banner: Eye EAR, blink rate, fatigue state, real-time ballistic VU meter & mic tag
+    - Bottom banner: Eye EAR, blink rate, fatigue state, mission status
     - Face reticle: Corner-bracket tactical targeting reticle with zero collision
     """
-    snap = ls.snapshot_face() if hasattr(ls, "snapshot_face") else ls.snapshot()
+    snap = ls.snapshot_face_nonblocking() if hasattr(ls, "snapshot_face_nonblocking") else ls.snapshot_face()
     h, w = bgr.shape[:2]
 
     # 1. Semi-transparent top aerospace banner slice (42px)
     top_h = min(42, h)
     top_slice = bgr[0:top_h, 0:w]
-    bg_top = np.full_like(top_slice, (12, 16, 24), dtype=np.uint8)
+    bg_top = _get_hud_bg_slice(top_h, w)
     cv2.addWeighted(bg_top, 0.65, top_slice, 0.35, 0, top_slice)
     cv2.line(bgr, (0, top_h), (w, top_h), (60, 80, 110), 1)
 
@@ -326,7 +401,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     bot_h = min(36, h)
     y_bot = max(0, h - bot_h)
     bot_slice = bgr[y_bot:h, 0:w]
-    bg_bot = np.full_like(bot_slice, (12, 16, 24), dtype=np.uint8)
+    bg_bot = _get_hud_bg_slice(bot_h, w)
     cv2.addWeighted(bg_bot, 0.65, bot_slice, 0.35, 0, bot_slice)
     cv2.line(bgr, (0, y_bot), (w, y_bot), (60, 80, 110), 1)
 
@@ -412,7 +487,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
         cv2.putText(bgr, telem_text, (x_telem, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, clarity_col, 1, cv2.LINE_AA)
 
-    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Mic & Mission Status)
+    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Astronaut Vision Tag)
     fatigue = snap.get("fatigue_label", "Normal")
     fatigue_col = {
         "Normal":        (0, 230, 118),
@@ -422,57 +497,22 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     }.get(fatigue, (180, 180, 180))
 
     eye_text = f"EAR: {snap.get('ear', 0.30):.2f}   BLINK: {snap.get('blink_rate', 0.0):.0f}/min   FATIGUE: {fatigue.upper()}"
-    # Tactical Real-Time VU Meter directly on the live video stream (30 FPS native, zero Streamlit latency)
-    rms    = snap.get("voice_rms", 0.0)
-    is_spk = snap.get("is_speaking", False)
-    v_emo  = snap.get("voice_emotion", "neutral")
-    v_conf = snap.get("voice_confidence", 0.0)
-    if hasattr(ls, "voice_lock") and ls.voice_lock.acquire(blocking=False):
-        try:
-            rms    = ls.voice_rms
-            is_spk = ls.is_speaking
-            v_emo  = ls.voice_emotion
-            v_conf = ls.voice_confidence
-        finally:
-            ls.voice_lock.release()
-
-    meter_w = 85
-    meter_h = 10
-    meter_x = w - meter_w - 14
-    meter_y = h - 23
-
-    # Draw meter background box
-    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (18, 24, 34), -1)
-    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (70, 95, 125), 1)
-
-    # Dynamic fill calculation: calibrated -45 dB ambient floor to 0 dB peak
-    eff_rms = max(0.001, rms)
-    db_val = max(-50.0, min(0.0, 20.0 * np.log10(eff_rms)))
-    hud_pct = min(1.0, max(0.0, (db_val + 45.0) / 45.0))
-
-    fill_w = int(meter_w * hud_pct)
-    if fill_w > 0:
-        vu_col = (0, 230, 118) if hud_pct < 0.55 else (0, 215, 255) if hud_pct < 0.80 else (50, 50, 255)
-        cv2.rectangle(bgr, (meter_x + 1, meter_y + 1), (meter_x + fill_w, meter_y + meter_h - 1), vu_col, -1)
-
-    # Mic status tag next to the meter
-    if is_spk:
-        v_emo_str = str(v_emo).upper()
-        v_conf_pct = float(v_conf) * 100.0
-        mission_tag = f"MIC: {v_emo_str} {v_conf_pct:.0f}%"
-        tag_col = (0, 230, 118)
-    else:
-        mission_tag = "MIC [IDLE]"
-        tag_col = (130, 145, 160)
-
-    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-    tag_x = meter_x - tw_tag - 8
-    cv2.putText(bgr, mission_tag, (tag_x, h - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, tag_col, 1, cv2.LINE_AA)
+    mission_tag = "MAITRI 2.0 // ASTRONAUT VISION"
 
     (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+    x_tag = w - tw_tag - 14
+
+    if 14 + tw_eye + 16 > x_tag:
+        mission_tag = "MAITRI 2.0"
+        (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        x_tag = w - tw_tag - 14
+
     cv2.putText(bgr, eye_text, (14, h - 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, fatigue_col, 1, cv2.LINE_AA)
+    if 14 + tw_eye + 12 <= x_tag:
+        cv2.putText(bgr, mission_tag, (x_tag, h - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
 
     return bgr
 
@@ -811,7 +851,17 @@ with tab_live:
         st.caption("Background ML pipeline · MediaPipe Eye Tracking (~10 FPS)")
 
         rtc_config = RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            {
+                "iceServers": [
+                    {
+                        "urls": [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:19302",
+                            "stun:stun2.l.google.com:19302",
+                        ]
+                    }
+                ]
+            }
         )
 
         # ── Prevent Streamlit fragments from desyncing WebRTC run counters ──

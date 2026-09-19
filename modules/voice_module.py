@@ -833,3 +833,20 @@ class VoiceDetector:
 
     def __del__(self):
         self.stop()
+
+
+# ── Global Singleton Helper (Eliminates Duplicate Mic Capture Streams) ─────
+_active_voice_detector: Optional[VoiceDetector] = None
+_active_detector_lock = threading.Lock()
+
+def get_or_create_voice_detector(live_state=None) -> VoiceDetector:
+    """Singleton helper ensuring only one audio capture stream runs across Streamlit reruns."""
+    global _active_voice_detector
+    with _active_detector_lock:
+        if _active_voice_detector is None or not _active_voice_detector._running:
+            _active_voice_detector = VoiceDetector(live_state)
+            _active_voice_detector.start()
+        else:
+            if live_state is not None:
+                _active_voice_detector.live_state = live_state
+        return _active_voice_detector

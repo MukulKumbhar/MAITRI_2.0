@@ -93,10 +93,10 @@ def _get_onnx_session():
         _onnx_init_attempted = True
 
         candidate_paths = [
-            os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
             os.path.join(_MODELS_DIR, "enet_b2_7.onnx"),
-            os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
+            os.path.join(_MODELS_DIR, "enet_b0_8_best_vgaf.onnx"),
             os.path.expanduser("~/.hsemotion/enet_b2_7.onnx"),
+            os.path.expanduser("~/.hsemotion/enet_b0_8_best_vgaf.onnx"),
         ]
 
         found_path = None
@@ -117,7 +117,7 @@ def _get_onnx_session():
         try:
             import onnxruntime as ort
             sess_opts = ort.SessionOptions()
-            sess_opts.intra_op_num_threads = min(4, os.cpu_count() or 4)
+            sess_opts.intra_op_num_threads = min(6, os.cpu_count() or 6)
             sess_opts.inter_op_num_threads = 1
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -492,6 +492,46 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
                     deep_dom, deep_probs, deep_conf, is_smiling, smile_score, cheek_score
                 )
 
+                # 6b. Temporal Exponential Moving Average & Hysteresis Smoothing
+                if eye_session is not None:
+                    prev_probs = getattr(eye_session, "face_ema_probs", None)
+                    prev_dom   = getattr(eye_session, "face_dominant", None)
+                    alpha = 1.0 if is_smiling else 0.65
+
+                    if prev_probs is not None:
+                        ema_probs = {}
+                        for e in EMOTIONS:
+                            p = fused_probs.get(e, 0.0)
+                            prev_p = prev_probs.get(e, p)
+                            ema_probs[e] = alpha * p + (1.0 - alpha) * prev_p
+                        tot = sum(ema_probs.values())
+                        if tot > 0:
+                            ema_probs = {k: round(v / tot * 100.0, 2) for k, v in ema_probs.items()}
+                    else:
+                        ema_probs = fused_probs
+
+                    cand_dom = max(ema_probs, key=ema_probs.get)
+                    cand_p   = ema_probs[cand_dom]
+                    prev_p   = ema_probs.get(prev_dom, 0.0) if prev_dom else 0.0
+
+                    if cand_dom == prev_dom or prev_dom is None or is_smiling:
+                        final_dom = cand_dom
+                    else:
+                        # 6% hysteresis margin prevents frame-by-frame label flipping
+                        if cand_p > prev_p + 6.0 or (cand_p >= 45.0 and prev_p < 25.0):
+                            final_dom = cand_dom
+                        else:
+                            final_dom = prev_dom
+
+                    final_conf = ema_probs[final_dom] / 100.0
+                    eye_session.face_ema_probs = ema_probs
+                    eye_session.face_dominant  = final_dom
+                    eye_session.face_conf      = final_conf
+
+                    dominant    = final_dom
+                    fused_probs = ema_probs
+                    conf        = final_conf
+
                 # 7. Multi-factor quality score
                 quality = compute_face_quality(
                     conf, blur_score, is_blurry, box_dict["w"], box_dict["h"],
@@ -539,6 +579,9 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         return ssd_res, eye_res
 
     # No face detected in frame
+    if eye_session is not None:
+        eye_session.face_ema_probs = None
+        eye_session.face_dominant  = None
     blur_score = compute_blur_metric(work_frame)
     no_face_res = FaceResult(
         emotion_probs=_uniform_probs(),
