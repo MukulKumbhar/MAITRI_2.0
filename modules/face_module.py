@@ -63,6 +63,10 @@ _onnx_session = None
 _onnx_model_path = None
 _onnx_img_size = 260
 _onnx_class_map = None
+
+# Preallocated ImageNet normalization constants (avoids per-frame allocations)
+_NORM_INV_STD = (1.0 / (255.0 * np.array([0.229, 0.224, 0.225], dtype=np.float32))).reshape(1, 1, 3)
+_NORM_MEAN_DIV_STD = (np.array([0.485, 0.456, 0.406], dtype=np.float32) / np.array([0.229, 0.224, 0.225], dtype=np.float32)).reshape(1, 1, 3)
 _onnx_init_attempted = False
 
 _df_lock = threading.Lock()
@@ -356,12 +360,9 @@ def _predict_onnx(face_bgr: np.ndarray) -> Tuple[str, Dict[str, float], float]:
 
     try:
         face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(face_rgb, (_onnx_img_size, _onnx_img_size), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
-
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        norm = (resized - mean) / std
-        tensor = np.ascontiguousarray(np.expand_dims(np.transpose(norm, (2, 0, 1)), axis=0), dtype=np.float32)
+        resized = cv2.resize(face_rgb, (_onnx_img_size, _onnx_img_size), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        norm = resized * _NORM_INV_STD - _NORM_MEAN_DIV_STD
+        tensor = np.ascontiguousarray(np.transpose(norm, (2, 0, 1))[np.newaxis, ...], dtype=np.float32)
 
         input_name = session.get_inputs()[0].name
         raw_scores = session.run(None, {input_name: tensor})[0][0]

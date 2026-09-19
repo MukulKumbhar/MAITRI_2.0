@@ -28,30 +28,53 @@ try:
     import streamlit_webrtc.component as _st_webrtc_comp
     _WEBRTC_OK = True
 
-    # ── Robust Streamlit 1.33+ Fragment Protection for WebRTC Lifecycle ──
-    # Prevents background fragment reruns from causing orphaned context resets or GC teardowns
-    _orig_set_worker = _st_webrtc_comp.WebRtcStreamerContext._set_worker
-    def _patched_set_worker(self, worker):
-        self._strong_worker = worker  # Prevent premature GC reaping
-        _orig_set_worker(self, worker)
-    _st_webrtc_comp.WebRtcStreamerContext._set_worker = _patched_set_worker
+    # ── Rock-Solid WebRTC Lifecycle & Worker Hardening ─────────────────────────
+    # 1. Prevent aiortc from aborting stream on transient ICE "disconnected" state
+    #    (e.g., 5s consent check jitter under CPU load or STUN delay).
+    try:
+        from aiortc import RTCPeerConnection
+        _orig_listens_to = RTCPeerConnection.listens_to
+        def _hardened_listens_to(self, event: str):
+            decorator = _orig_listens_to(self, event)
+            if event == "iceconnectionstatechange":
+                def wrapped_decorator(handler):
+                    async def wrapped_handler(*args, **kwargs):
+                        state = getattr(self, "iceConnectionState", None)
+                        if state == "disconnected":
+                            return  # Suppress transient disconnect; keep stream running
+                        return await handler(*args, **kwargs)
+                    return decorator(wrapped_handler)
+                return wrapped_decorator
+            return decorator
+        RTCPeerConnection.listens_to = _hardened_listens_to
+    except Exception:
+        pass
 
-    _orig_reset_context = _st_webrtc_comp._reset_context
-    def _patched_reset_context(context):
-        # If user explicitly stopped via frontend toggle (state is neither playing nor signalling), allow clean reset
-        if not getattr(context.state, "playing", False) and not getattr(context.state, "signalling", False):
-            _orig_reset_context(context)
-            return
+    # 2. Prevent Streamlit reruns / widget interactions from losing the WebRTC component value
+    _orig_restore_snapshot = _st_webrtc_comp._restore_snapshot_if_needed
+    def _hardened_restore_snapshot(context, component_value):
         worker = context._get_worker() if hasattr(context, "_get_worker") else None
-        if worker is not None:
-            pc = getattr(worker, "pc", None)
-            if pc and getattr(pc, "connectionState", None) not in ("closed", "failed"):
-                return  # Active streaming connection — do not tear down
-        _orig_reset_context(context)
-    _st_webrtc_comp._reset_context = _patched_reset_context
+        is_active = (
+            (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
+            or getattr(context.state, "playing", False)
+            or getattr(context.state, "signalling", False)
+        )
+        if component_value is None and is_active:
+            snap = getattr(context, "_component_value_snapshot", None)
+            if snap is not None and snap.component_value is not None:
+                component_value = snap.component_value
 
+        val = _orig_restore_snapshot(context, component_value)
+        if val is None and is_active:
+            snap = getattr(context, "_component_value_snapshot", None)
+            if snap is not None and snap.component_value is not None:
+                val = snap.component_value
+        return val
+    _st_webrtc_comp._restore_snapshot_if_needed = _hardened_restore_snapshot
+
+    # 3. Prevent orphan context cleanup from killing an active streaming session
     _orig_get_or_create_context = _st_webrtc_comp._get_or_create_context
-    def _patched_get_or_create_context(key: str):
+    def _hardened_get_or_create_context(key: str):
         if key in st.session_state:
             ctx = st.session_state[key]
             worker = ctx._get_worker() if hasattr(ctx, "_get_worker") else None
@@ -66,28 +89,7 @@ try:
                 if rc is not None:
                     ctx._last_rendered_run_count = rc
         return _orig_get_or_create_context(key)
-    _st_webrtc_comp._get_or_create_context = _patched_get_or_create_context
-
-    _orig_restore_snapshot = _st_webrtc_comp._restore_snapshot_if_needed
-    def _patched_restore_snapshot(context, component_value):
-        if component_value is None and getattr(context, "_component_value_snapshot", None) is not None:
-            worker = context._get_worker() if hasattr(context, "_get_worker") else None
-            is_active = (
-                (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) not in ("closed", "failed"))
-                or getattr(context.state, "playing", False)
-                or getattr(context.state, "signalling", False)
-            )
-            if is_active:
-                sinfo = _st_webrtc_comp.get_this_session_info()
-                rc = _st_webrtc_comp.get_script_run_count(sinfo) if sinfo else None
-                snap = context._component_value_snapshot
-                if rc is not None and snap is not None:
-                    context._component_value_snapshot = _st_webrtc_comp.ComponentValueSnapshot(
-                        component_value=snap.component_value,
-                        run_count=rc - 1
-                    )
-        return _orig_restore_snapshot(context, component_value)
-    _st_webrtc_comp._restore_snapshot_if_needed = _patched_restore_snapshot
+    _st_webrtc_comp._get_or_create_context = _hardened_get_or_create_context
 
 except ImportError:
     _WEBRTC_OK = False
@@ -267,7 +269,7 @@ class MAITRIVideoProcessor:
                 except queue.Full:
                     pass
 
-            # Draw sleek aerospace glass HUD using latest cached face telemetry (NO voice)
+            # Draw sleek aerospace glass HUD using latest cached telemetry
             try:
                 bgr = _draw_aerospace_hud(bgr, ls)
             except Exception:
@@ -307,7 +309,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     Sleek, high-contrast semi-transparent aerospace glass HUD:
     - Slice-based in-place alpha blending (no full frame copy, 12x lower rendering overhead)
     - Top banner: System status, emotion badge with color indicator, confidence %, passive clarity
-    - Bottom banner: Eye EAR, blink rate, fatigue state, dynamic non-overlapping mission tag
+    - Bottom banner: Eye EAR, blink rate, fatigue state, real-time ballistic VU meter & mic tag
     - Face reticle: Corner-bracket tactical targeting reticle with zero collision
     """
     snap = ls.snapshot_face() if hasattr(ls, "snapshot_face") else ls.snapshot()
@@ -330,9 +332,9 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
 
     # 3. Corner-bracket face reticle
     box = snap.get("face_box")
-    emo = snap["face_emotion"].upper()
-    conf = snap["face_confidence"] * 100.0
-    is_blurry = snap["is_blurry"]
+    emo = snap.get("face_emotion", "neutral").upper()
+    conf = snap.get("face_confidence", 0.0) * 100.0
+    is_blurry = snap.get("is_blurry", False)
 
     EMO_HUD_COLORS = {
         "HAPPY":     (0,   215, 255),  # Gold/Yellow
@@ -383,16 +385,16 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, theme_color, 2, cv2.LINE_AA)
 
     # 4. Top Banner Content (Left: Emotion Status, Right: System Telemetry)
-    if box is not None or snap["face_quality"] > 0.10:
+    if box is not None or snap.get("face_quality", 0.0) > 0.10:
         status_text = f"● {emo}  {conf:.0f}%"
         status_color = theme_color
     else:
         status_text = "◌ SCANNING ASTRONAUT..."
         status_color = (160, 175, 190)
 
-    clarity_lbl = "BLUR GATED" if is_blurry else f"SHARP ({snap['blur_score']:.0f})"
+    clarity_lbl = "BLUR GATED" if is_blurry else f"SHARP ({snap.get('blur_score', 100.0):.0f})"
     clarity_col = (0, 165, 255) if is_blurry else (0, 230, 118)
-    telem_text = f"DIP: ISOTROPIC | {clarity_lbl} | #{snap['frame_count']}"
+    telem_text = f"DIP: ISOTROPIC | {clarity_lbl} | #{snap.get('frame_count', 0)}"
 
     (tw_status, _), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
     (tw_telem, _), _  = cv2.getTextSize(telem_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
@@ -400,7 +402,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
 
     if 14 + tw_status + 16 > x_telem:
         # Compact telemetry label to guarantee zero overlap on small resolutions
-        telem_text = f"{clarity_lbl} | #{snap['frame_count']}"
+        telem_text = f"{clarity_lbl} | #{snap.get('frame_count', 0)}"
         (tw_telem, _), _ = cv2.getTextSize(telem_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
         x_telem = w - tw_telem - 14
 
@@ -410,7 +412,7 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
         cv2.putText(bgr, telem_text, (x_telem, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, clarity_col, 1, cv2.LINE_AA)
 
-    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Astronaut Vision Tag)
+    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Mic & Mission Status)
     fatigue = snap.get("fatigue_label", "Normal")
     fatigue_col = {
         "Normal":        (0, 230, 118),
@@ -420,22 +422,57 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState) -> np.ndarray:
     }.get(fatigue, (180, 180, 180))
 
     eye_text = f"EAR: {snap.get('ear', 0.30):.2f}   BLINK: {snap.get('blink_rate', 0.0):.0f}/min   FATIGUE: {fatigue.upper()}"
-    mission_tag = "MAITRI 2.0 // ASTRONAUT VISION"
+    # Tactical Real-Time VU Meter directly on the live video stream (30 FPS native, zero Streamlit latency)
+    rms    = snap.get("voice_rms", 0.0)
+    is_spk = snap.get("is_speaking", False)
+    v_emo  = snap.get("voice_emotion", "neutral")
+    v_conf = snap.get("voice_confidence", 0.0)
+    if hasattr(ls, "voice_lock") and ls.voice_lock.acquire(blocking=False):
+        try:
+            rms    = ls.voice_rms
+            is_spk = ls.is_speaking
+            v_emo  = ls.voice_emotion
+            v_conf = ls.voice_confidence
+        finally:
+            ls.voice_lock.release()
+
+    meter_w = 85
+    meter_h = 10
+    meter_x = w - meter_w - 14
+    meter_y = h - 23
+
+    # Draw meter background box
+    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (18, 24, 34), -1)
+    cv2.rectangle(bgr, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (70, 95, 125), 1)
+
+    # Dynamic fill calculation: calibrated -45 dB ambient floor to 0 dB peak
+    eff_rms = max(0.001, rms)
+    db_val = max(-50.0, min(0.0, 20.0 * np.log10(eff_rms)))
+    hud_pct = min(1.0, max(0.0, (db_val + 45.0) / 45.0))
+
+    fill_w = int(meter_w * hud_pct)
+    if fill_w > 0:
+        vu_col = (0, 230, 118) if hud_pct < 0.55 else (0, 215, 255) if hud_pct < 0.80 else (50, 50, 255)
+        cv2.rectangle(bgr, (meter_x + 1, meter_y + 1), (meter_x + fill_w, meter_y + meter_h - 1), vu_col, -1)
+
+    # Mic status tag next to the meter
+    if is_spk:
+        v_emo_str = str(v_emo).upper()
+        v_conf_pct = float(v_conf) * 100.0
+        mission_tag = f"MIC: {v_emo_str} {v_conf_pct:.0f}%"
+        tag_col = (0, 230, 118)
+    else:
+        mission_tag = "MIC [IDLE]"
+        tag_col = (130, 145, 160)
+
+    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+    tag_x = meter_x - tw_tag - 8
+    cv2.putText(bgr, mission_tag, (tag_x, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, tag_col, 1, cv2.LINE_AA)
 
     (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
-    x_tag = w - tw_tag - 14
-
-    if 14 + tw_eye + 16 > x_tag:
-        mission_tag = "MAITRI 2.0"
-        (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        x_tag = w - tw_tag - 14
-
     cv2.putText(bgr, eye_text, (14, h - 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, fatigue_col, 1, cv2.LINE_AA)
-    if 14 + tw_eye + 12 <= x_tag:
-        cv2.putText(bgr, mission_tag, (x_tag, h - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
 
     return bgr
 
@@ -774,17 +811,7 @@ with tab_live:
         st.caption("Background ML pipeline · MediaPipe Eye Tracking (~10 FPS)")
 
         rtc_config = RTCConfiguration(
-            {
-                "iceServers": [
-                    {
-                        "urls": [
-                            "stun:stun.l.google.com:19302",
-                            "stun:stun1.l.google.com:19302",
-                            "stun:stun2.l.google.com:19302",
-                        ]
-                    }
-                ]
-            }
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
         # ── Prevent Streamlit fragments from desyncing WebRTC run counters ──
