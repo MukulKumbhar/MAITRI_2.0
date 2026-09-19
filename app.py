@@ -8,9 +8,10 @@ os.environ["CUDA_VISIBLE_DEVICES"]  = "-1"
 import queue
 import threading
 import time
+import math
 import av
 import cv2
-cv2.setNumThreads(2)
+cv2.setNumThreads(1)
 import numpy as np
 from typing import Optional
 import streamlit as st
@@ -224,7 +225,12 @@ if "models_warmed" not in st.session_state:
         from modules.voice_module import _get_voice_onnx_session
         _get_onnx_session()
         _get_voice_onnx_session()
-        _dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+        _test_img_path = os.path.join(os.path.dirname(__file__), "tests", "test_face.jpg")
+        if os.path.isfile(_test_img_path):
+            _dummy = cv2.imread(_test_img_path)
+        else:
+            _dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.rectangle(_dummy, (200, 100), (440, 380), (180, 180, 180), -1)
         process_unified_frame(_dummy, st.session_state.eye_state)
         st.session_state.models_warmed = True
     except Exception:
@@ -257,6 +263,9 @@ class MAITRIVideoProcessor:
         # Single-slot queue — drops frames when background worker is busy (zero lag)
         self._inference_queue: queue.Queue = queue.Queue(maxsize=1)
 
+        # Smooth reticle tracking filter state
+        self._display_box: Optional[dict] = None
+
         # Unified background worker
         self._worker = threading.Thread(
             target=self._unified_inference_worker, daemon=True, name="maitri-unified-worker"
@@ -284,6 +293,7 @@ class MAITRIVideoProcessor:
 
             if bgr is None or not self._running:
                 break
+            t_start = time.perf_counter()
             try:
                 face_res, eye_res = process_unified_frame(bgr, self.eye_state)
                 ls = self.live_state
@@ -310,6 +320,13 @@ class MAITRIVideoProcessor:
             except Exception as exc:
                 print(f"[MAITRI] Unified worker error: {exc}")
 
+            # Pace worker at ~30 FPS (yielding CPU if inference was faster than 33ms)
+            # This completely prevents CPU thrashing and starves neither aiortc nor WebRTC video encoding
+            elapsed = time.perf_counter() - t_start
+            remain = 0.033 - elapsed
+            if remain > 0.002:
+                time.sleep(remain)
+
     # ── Per-frame recv callback — ZERO blocking (<1ms execution) ──────────
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         """
@@ -334,9 +351,38 @@ class MAITRIVideoProcessor:
             except queue.Full:
                 pass
 
+            # Smooth reticle filtering: eliminates discrete coordinate steps and jumping
+            snap = ls.snapshot_face_nonblocking() if hasattr(ls, "snapshot_face_nonblocking") else ls.snapshot_face()
+            raw_box = snap.get("face_box")
+            display_box = None
+            if raw_box is not None:
+                rx, ry = float(raw_box["x"]), float(raw_box["y"])
+                rw, rh = float(raw_box["w"]), float(raw_box["h"])
+                if self._display_box is None:
+                    self._display_box = {"x": rx, "y": ry, "w": rw, "h": rh}
+                else:
+                    dx = rx - self._display_box["x"]
+                    dy = ry - self._display_box["y"]
+                    dist = math.hypot(dx, dy)
+                    # Adaptive alpha: fast tracking on head movement, stabilization on micro-jitter
+                    alpha = 0.85 if dist > 25.0 else (0.65 if dist > 6.0 else 0.40)
+                    self._display_box["x"] += alpha * dx
+                    self._display_box["y"] += alpha * dy
+                    self._display_box["w"] += 0.50 * (rw - self._display_box["w"])
+                    self._display_box["h"] += 0.50 * (rh - self._display_box["h"])
+
+                display_box = {
+                    "x": int(round(self._display_box["x"])),
+                    "y": int(round(self._display_box["y"])),
+                    "w": int(round(self._display_box["w"])),
+                    "h": int(round(self._display_box["h"])),
+                }
+            else:
+                self._display_box = None
+
             # Draw sleek aerospace glass HUD using latest cached telemetry
             try:
-                bgr = _draw_aerospace_hud(bgr, ls)
+                bgr = _draw_aerospace_hud(bgr, ls, display_box=display_box)
             except Exception:
                 pass
 
@@ -891,14 +937,21 @@ with tab_live:
         _ACTIVE_LIVE_STATE = st.session_state.live_state
         _ACTIVE_EYE_STATE  = st.session_state.eye_state
 
-        # Video-only WebRTC pipeline (<1ms recv latency, 30 FPS locked, zero audio sync delay)
+        # Direct synchronous WebRTC video pipeline (<1ms recv latency, locked 30 FPS, zero queue buffering delay)
         ctx = webrtc_streamer(
             key="maitri-live",
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             video_processor_factory=_make_video_processor,
-            media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
-            async_processing=True,
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 640, "max": 640},
+                    "height": {"ideal": 480, "max": 480},
+                    "frameRate": {"ideal": 30, "max": 30},
+                },
+                "audio": False,
+            },
+            async_processing=False,
         )
 
         _render_dip_status(ctx.state.playing)

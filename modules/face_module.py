@@ -117,7 +117,7 @@ def _get_onnx_session():
         try:
             import onnxruntime as ort
             sess_opts = ort.SessionOptions()
-            sess_opts.intra_op_num_threads = min(6, os.cpu_count() or 6)
+            sess_opts.intra_op_num_threads = min(4, os.cpu_count() or 4)
             sess_opts.inter_op_num_threads = 1
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -566,11 +566,11 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
     # Transient motion persistence window (absorbs single momentary frame drops without lagging behind motion)
     if eye_session is not None and getattr(eye_session, "last_face_box", None) is not None:
         eye_session.consecutive_missing = getattr(eye_session, "consecutive_missing", 0) + 1
-        if eye_session.consecutive_missing <= 2:
+        if eye_session.consecutive_missing <= 5:
             prev_f = eye_session.last_face_res
             prev_e = eye_session.last_eye_res
             coasted_box = dict(eye_session.last_face_box)
-            coasted_decay = 0.95 ** min(eye_session.consecutive_missing, 2)
+            coasted_decay = 0.92 ** min(eye_session.consecutive_missing, 5)
             coasted_conf = max(0.20, (prev_f.face_confidence if prev_f else 0.50) * coasted_decay)
             coasted_probs = dict(eye_session.face_ema_probs) if getattr(eye_session, "face_ema_probs", None) else _uniform_probs()
             coasted_dom = getattr(eye_session, "face_dominant", None) or (prev_f.dominant_emotion if prev_f else "neutral")
@@ -623,9 +623,9 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         )
         return ssd_res, eye_res
 
-    # No face detected in frame (lost for > 2 frames and SSD also missed)
+    # No face detected in frame (lost for > 5 frames and SSD also missed)
     if eye_session is not None:
-        if getattr(eye_session, "consecutive_missing", 0) > 2:
+        if getattr(eye_session, "consecutive_missing", 0) > 5:
             eye_session.face_ema_probs = None
             eye_session.face_dominant  = None
             eye_session.last_face_box  = None
