@@ -48,6 +48,7 @@ class DAPProsody(dict):
         pitch_spread: float = 0.0,
         modulation_depth: float = 0.0,
         r_env: float = 0.0,
+        pitch_slope: float = 0.0,
     ):
         super().__init__(
             spectral_centroid=spectral_centroid,
@@ -55,12 +56,14 @@ class DAPProsody(dict):
             pitch_spread=pitch_spread,
             modulation_depth=modulation_depth,
             r_env=r_env,
+            pitch_slope=pitch_slope,
         )
         self.spectral_centroid = float(spectral_centroid)
         self.f0_mean = float(f0_mean)
         self.pitch_spread = float(pitch_spread)
         self.modulation_depth = float(modulation_depth)
         self.r_env = float(r_env)
+        self.pitch_slope = float(pitch_slope)
 
 
 def apply_infrasonic_filter(
@@ -230,9 +233,11 @@ def compute_dap_prosody(
 
         f0_mean = float(np.mean(f0_list)) if f0_list else 0.0
         pitch_spread = float(np.std(f0_list)) if len(f0_list) > 1 else 0.0
+        pitch_slope = float(np.mean(np.diff(f0_list))) if len(f0_list) > 1 else 0.0
     else:
         f0_mean = 0.0
         pitch_spread = 0.0
+        pitch_slope = 0.0
 
     return DAPProsody(
         spectral_centroid=centroid,
@@ -240,6 +245,7 @@ def compute_dap_prosody(
         pitch_spread=pitch_spread,
         modulation_depth=mod_depth,
         r_env=r_env,
+        pitch_slope=pitch_slope,
     )
 
 
@@ -247,17 +253,17 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
     """
     Biological laughter reflex detector.
     Laughter produces rhythmic staccato bursts (3.8–7.0 Hz modulation) accompanied
-    by high dynamic contrast and characteristic periodic acoustic energy.
+    by high dynamic contrast, bright acoustic energy, and flat or rising pitch contours.
 
     Dual-trigger architecture:
     1. Primary DAP trigger (bright staccato bursts):
        R_env(τ) ≥ 0.50 AND mod_depth ≥ 0.70 AND centroid ≥ 1400 Hz.
     2. Voiced vocal laughter trigger (natural vowel bursts "ha-ha", "ho-ho", "he-he"):
-       Human vowel formants naturally place centroid in 450–1400 Hz range.
-       R_env(τ) ≥ 0.60 AND mod_depth ≥ 0.75 AND centroid ≥ 400 Hz (securely rejects rumble < 75 Hz).
+       Human vowel formants naturally place centroid in 300–1400 Hz range.
+       R_env(τ) ≥ 0.60 AND mod_depth ≥ 0.75 AND centroid ≥ 300 Hz.
 
-    Accurately isolates laughter (R_env ~ 0.87) from angry shouting (R_env ~ 0.19)
-    and conversational speech (R_env ~ 0.10).
+    Crying protection:
+    Falling pitch contours (pitch_slope < -0.15) reject crying/sobbing from triggering laughter.
     """
     if dap is None:
         return False
@@ -280,6 +286,16 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
     elif centroid is None:
         centroid = 0.0
 
+    pitch_slope = getattr(dap, "pitch_slope", None)
+    if pitch_slope is None and isinstance(dap, dict):
+        pitch_slope = dap.get("pitch_slope", 0.0)
+    elif pitch_slope is None:
+        pitch_slope = 0.0
+
+    # Crying protection: weeping/sobbing has distinctly falling pitch slopes
+    if pitch_slope < -0.15:
+        return False
+
     # 1. Primary DAP trigger: bright / breathy staccato bursts
     if r_env >= 0.50 and mod_depth >= 0.70 and centroid >= 1400.0:
         return True
@@ -289,6 +305,58 @@ def evaluate_laughter_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> boo
         return True
 
     return False
+
+
+def evaluate_crying_reflex(dap: Union[DAPProsody, Dict[str, Any], Any]) -> bool:
+    """
+    Biological crying/sobbing/weeping reflex detector.
+    Crying produces rhythmic sobbing spasms (3.5–7.0 Hz modulation) with
+    characteristic falling pitch contours (pitch_slope < -0.15) or high-pitched
+    whimpering distress.
+    """
+    if dap is None:
+        return False
+
+    r_env = getattr(dap, "r_env", None)
+    if r_env is None and isinstance(dap, dict):
+        r_env = dap.get("r_env", 0.0)
+    elif r_env is None:
+        r_env = 0.0
+
+    mod_depth = getattr(dap, "modulation_depth", None)
+    if mod_depth is None and isinstance(dap, dict):
+        mod_depth = dap.get("modulation_depth", 0.0)
+    elif mod_depth is None:
+        mod_depth = 0.0
+
+    centroid = getattr(dap, "spectral_centroid", None)
+    if centroid is None and isinstance(dap, dict):
+        centroid = dap.get("spectral_centroid", 0.0)
+    elif centroid is None:
+        centroid = 0.0
+
+    f0_mean = getattr(dap, "f0_mean", None)
+    if f0_mean is None and isinstance(dap, dict):
+        f0_mean = dap.get("f0_mean", 0.0)
+    elif f0_mean is None:
+        f0_mean = 0.0
+
+    pitch_slope = getattr(dap, "pitch_slope", None)
+    if pitch_slope is None and isinstance(dap, dict):
+        pitch_slope = dap.get("pitch_slope", 0.0)
+    elif pitch_slope is None:
+        pitch_slope = 0.0
+
+    # 1. Rhythmic sobbing spasms: high modulation + falling pitch slope
+    if r_env >= 0.40 and mod_depth >= 0.65 and pitch_slope < -0.15:
+        return True
+
+    # 2. High-pitched whimpering / distress weeping (F0 > 270 Hz with downward drift)
+    if f0_mean > 270.0 and pitch_slope < -0.20 and centroid < 1000.0:
+        return True
+
+    return False
+
 
 
 def compute_prosodic_logit_prior(dap: Union[DAPProsody, Dict[str, Any], Any]) -> np.ndarray:

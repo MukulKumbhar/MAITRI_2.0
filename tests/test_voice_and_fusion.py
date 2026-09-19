@@ -48,6 +48,7 @@ from modules.dap_enhancer import (
     apply_infrasonic_filter,
     compute_dap_prosody,
     evaluate_laughter_reflex,
+    evaluate_crying_reflex,
     compute_prosodic_logit_prior,
     calibrate_logits,
     DAPProsody,
@@ -703,6 +704,26 @@ class TestVoiceAndFusion(unittest.TestCase):
         dom, probs, conf, _, _ = predict_voice_emotion(cheerful_speech, sampling_rate=sr)
         self.assertEqual(dom, "happy", f"Expressive cheerful speech must predict 'happy', got '{dom}'")
         self.assertGreater(probs["happy"], probs["sad"], "Happy probability must exceed sad probability")
+
+    def test_27_crying_sobbing_reflex_detection(self):
+        """
+        Biological crying/sobbing reflex must detect weeping vocal spasms,
+        returning 'sad' with high confidence without triggering false laughter.
+        """
+        sr = 16000
+        t = np.linspace(0, 2.5, int(sr * 2.5), dtype=np.float32)
+        f0_cry = 340.0 - 60.0 * (t % 0.35) / 0.35 + 15.0 * np.sin(2 * np.pi * 12.0 * t)
+        phase_cry = 2 * np.pi * np.cumsum(f0_cry) / sr
+        sobbing_env = np.maximum(0.0, np.sin(2 * np.pi * 4.5 * t)) ** 2.5
+        crying_audio = (sobbing_env * (0.30 * np.sin(phase_cry) + 0.15 * np.sin(2 * phase_cry) + 0.10 * np.sin(3 * phase_cry))).astype(np.float32)
+
+        dap = compute_dap_prosody(crying_audio, sr=sr)
+        self.assertFalse(evaluate_laughter_reflex(dap), "Laughter reflex must not trigger on crying")
+        self.assertTrue(evaluate_crying_reflex(dap), "Crying reflex must trigger on sobbing bursts")
+
+        dom, probs, conf, _, _ = predict_voice_emotion(crying_audio, sampling_rate=sr)
+        self.assertEqual(dom, "sad", f"Crying/sobbing must predict 'sad', got '{dom}'")
+        self.assertGreater(probs["sad"], 0.85, "Sad probability must be high for crying")
 
 
 if __name__ == "__main__":

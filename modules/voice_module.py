@@ -37,6 +37,7 @@ from modules.dap_enhancer import (
     apply_infrasonic_filter,
     compute_dap_prosody,
     evaluate_laughter_reflex,
+    evaluate_crying_reflex,
     calibrate_logits,
 )
 
@@ -429,11 +430,16 @@ def predict_voice_emotion(
     # 3. DAP prosodic feature extraction
     dap = compute_dap_prosody(sig_filt, sr=sampling_rate)
 
-    # 4. Biological laughter reflex bypass
+    # 4. Biological laughter and crying reflex bypass
     if evaluate_laughter_reflex(dap):
         laugh_probs = {e: 0.01 for e in EMOTIONS}
         laugh_probs["happy"] = 0.94
         return "happy", laugh_probs, 0.94, quality, True
+
+    if evaluate_crying_reflex(dap):
+        cry_probs = {e: 0.01 for e in EMOTIONS}
+        cry_probs["sad"] = 0.94
+        return "sad", cry_probs, 0.94, quality, True
 
     # 5. Active speech frame isolation
     sig_centered = sig_filt - np.mean(sig_filt)
@@ -458,6 +464,10 @@ def predict_voice_emotion(
                     laugh_probs = {e: 0.01 for e in EMOTIONS}
                     laugh_probs["happy"] = 0.94
                     return "happy", laugh_probs, 0.94, quality, True
+                if evaluate_crying_reflex(dap_target):
+                    cry_probs = {e: 0.01 for e in EMOTIONS}
+                    cry_probs["sad"] = 0.94
+                    return "sad", cry_probs, 0.94, quality, True
                 dap = dap_target
 
     # 6. Wav2Vec2 ONNX inference
@@ -667,18 +677,39 @@ class VoiceDetector:
                             with self._lock:
                                 self._infer_in_flight = False
                                 if self._running and spk_ok:
-                                    self.latest_result["dominant_emotion"] = dom
-                                    self.latest_result["emotion_probs"]    = probs
-                                    self.latest_result["confidence"]       = conf
+                                    # Exponential Moving Average (EMA) smoothing to eliminate frame jitter
+                                    prev_probs = self.latest_result.get("emotion_probs", _DEFAULT_PROBS)
+                                    alpha = 0.55
+                                    smoothed_probs = {}
+                                    for emo in EMOTIONS:
+                                        smoothed_probs[emo] = alpha * probs.get(emo, 0.0) + (1.0 - alpha) * prev_probs.get(emo, 0.0)
+                                    total = sum(smoothed_probs.values())
+                                    if total > 1e-6:
+                                        smoothed_probs = {k: v / total for k, v in smoothed_probs.items()}
+
+                                    # Hysteresis on dominant emotion to prevent rapid flickering between close classes
+                                    prev_dom = self.latest_result.get("dominant_emotion", "neutral")
+                                    candidate_dom = max(smoothed_probs, key=smoothed_probs.get)
+                                    if (candidate_dom == prev_dom or
+                                        smoothed_probs[candidate_dom] > smoothed_probs.get(prev_dom, 0.0) + 0.07 or
+                                        smoothed_probs[candidate_dom] > 0.50):
+                                        new_dom = candidate_dom
+                                    else:
+                                        new_dom = prev_dom
+
+                                    new_conf = round(float(smoothed_probs[new_dom]), 3)
+                                    self.latest_result["dominant_emotion"] = new_dom
+                                    self.latest_result["emotion_probs"]    = smoothed_probs
+                                    self.latest_result["confidence"]       = new_conf
                                     self.latest_result["audio_quality"]    = qual
                                     self.latest_result["timestamp"]        = time.time()
 
                             if spk_ok and self.live_state is not None:
                                 ls = self.live_state
                                 with ls.lock:
-                                    ls.voice_emotion    = dom
-                                    ls.voice_probs      = dict(probs)
-                                    ls.voice_confidence = conf
+                                    ls.voice_emotion    = new_dom
+                                    ls.voice_probs      = dict(smoothed_probs)
+                                    ls.voice_confidence = new_conf
                                     ls.voice_quality    = qual
                         except Exception as exc:
                             with self._lock:

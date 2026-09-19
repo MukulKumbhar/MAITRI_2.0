@@ -136,7 +136,17 @@ dom, probs, conf, qual, is_spk = predict_voice_emotion(laugh_sig, sampling_rate=
 mark = "✓" if dom == "happy" else "✗"
 print(f"  {mark} Laughter       → dom='{dom}', conf={conf:.2f} (expected happy)", flush=True)
 
-# 3. High-energy angry speech pattern
+# 3. Crying / sobbing → should return sad
+cry_t = np.linspace(0, 2.5, int(SR * 2.5), dtype=np.float32)
+f0_cry = 340.0 - 60.0 * (cry_t % 0.35) / 0.35 + 15.0 * np.sin(2 * np.pi * 12.0 * cry_t)
+phase_cry = 2 * np.pi * np.cumsum(f0_cry) / SR
+sobbing_env = np.maximum(0.0, np.sin(2 * np.pi * 4.5 * cry_t)) ** 2.5
+crying_sig = (sobbing_env * (0.30 * np.sin(phase_cry) + 0.15 * np.sin(2 * phase_cry) + 0.10 * np.sin(3 * phase_cry))).astype(np.float32)
+dom, probs, conf, qual, is_spk = predict_voice_emotion(crying_sig, sampling_rate=SR)
+mark = "✓" if dom == "sad" else "✗"
+print(f"  {mark} Crying/sobbing → dom='{dom}', conf={conf:.2f} (expected sad)", flush=True)
+
+# 4. High-energy angry speech pattern
 angry_t = np.linspace(0, 2.0, SR * 2, dtype=np.float32)
 angry_sig = (0.40 * np.sin(2*np.pi*250*angry_t) + 0.20 * np.sin(2*np.pi*500*angry_t) +
              0.10 * np.random.randn(len(angry_t))).astype(np.float32)
