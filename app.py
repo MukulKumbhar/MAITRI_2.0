@@ -25,7 +25,58 @@ from modules.vitals_module   import compute_vitals_strain
 # ── WebRTC ────────────────────────────────────────────────────────────────
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+    import streamlit_webrtc.component as _st_webrtc_comp
     _WEBRTC_OK = True
+
+    # ── Robust Streamlit 1.33+ Fragment Protection for WebRTC Lifecycle ──
+    # Prevents background fragment reruns from causing orphaned context resets or GC teardowns
+    _orig_set_worker = _st_webrtc_comp.WebRtcStreamerContext._set_worker
+    def _patched_set_worker(self, worker):
+        self._strong_worker = worker  # Prevent premature GC reaping
+        _orig_set_worker(self, worker)
+    _st_webrtc_comp.WebRtcStreamerContext._set_worker = _patched_set_worker
+
+    _orig_reset_context = _st_webrtc_comp._reset_context
+    def _patched_reset_context(context):
+        worker = context._get_worker() if hasattr(context, "_get_worker") else None
+        if worker is not None:
+            pc = getattr(worker, "pc", None)
+            if pc and getattr(pc, "connectionState", None) in ("new", "checking", "connected"):
+                return  # Active streaming connection — do not tear down
+        _orig_reset_context(context)
+    _st_webrtc_comp._reset_context = _patched_reset_context
+
+    _orig_get_or_create_context = _st_webrtc_comp._get_or_create_context
+    def _patched_get_or_create_context(key: str):
+        if key in st.session_state:
+            ctx = st.session_state[key]
+            worker = ctx._get_worker() if hasattr(ctx, "_get_worker") else None
+            is_active = (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) in ("new", "checking", "connected")) or getattr(ctx.state, "playing", False)
+            if is_active:
+                sinfo = _st_webrtc_comp.get_this_session_info()
+                rc = _st_webrtc_comp.get_script_run_count(sinfo) if sinfo else None
+                if rc is not None:
+                    ctx._last_rendered_run_count = rc
+        return _orig_get_or_create_context(key)
+    _st_webrtc_comp._get_or_create_context = _patched_get_or_create_context
+
+    _orig_restore_snapshot = _st_webrtc_comp._restore_snapshot_if_needed
+    def _patched_restore_snapshot(context, component_value):
+        if component_value is None and getattr(context, "_component_value_snapshot", None) is not None:
+            worker = context._get_worker() if hasattr(context, "_get_worker") else None
+            is_active = (worker is not None and getattr(worker, "pc", None) and getattr(worker.pc, "connectionState", None) in ("new", "checking", "connected")) or getattr(context.state, "playing", False)
+            if is_active:
+                sinfo = _st_webrtc_comp.get_this_session_info()
+                rc = _st_webrtc_comp.get_script_run_count(sinfo) if sinfo else None
+                snap = context._component_value_snapshot
+                if rc is not None and snap is not None:
+                    context._component_value_snapshot = _st_webrtc_comp.ComponentValueSnapshot(
+                        component_value=snap.component_value,
+                        run_count=rc - 1
+                    )
+        return _orig_restore_snapshot(context, component_value)
+    _st_webrtc_comp._restore_snapshot_if_needed = _patched_restore_snapshot
+
 except ImportError:
     _WEBRTC_OK = False
 
@@ -805,31 +856,18 @@ with tab_live:
         st.caption("Background ML pipeline · MediaPipe Eye Tracking (~10 FPS)")
 
         rtc_config = RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            {
+                "iceServers": [
+                    {
+                        "urls": [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:19302",
+                            "stun:stun2.l.google.com:19302",
+                        ]
+                    }
+                ]
+            }
         )
-
-        # ── Prevent Streamlit fragments from desyncing WebRTC run counters ──
-        if "maitri-live" in st.session_state:
-            _rtc_ctx = st.session_state["maitri-live"]
-            try:
-                from streamlit_webrtc.component import (
-                    get_this_session_info,
-                    get_script_run_count,
-                    ComponentValueSnapshot,
-                )
-                _sinfo = get_this_session_info()
-                if _sinfo:
-                    _rc = get_script_run_count(_sinfo)
-                    if _rc is not None:
-                        if _rtc_ctx._last_rendered_run_count is not None:
-                            _rtc_ctx._last_rendered_run_count = _rc - 1
-                        if getattr(_rtc_ctx, "_component_value_snapshot", None) is not None:
-                            _rtc_ctx._component_value_snapshot = ComponentValueSnapshot(
-                                component_value=_rtc_ctx._component_value_snapshot.component_value,
-                                run_count=_rc - 1,
-                            )
-            except Exception:
-                pass
 
         # Refresh thread-safe references before WebRTC worker initialization
         _ACTIVE_LIVE_STATE = st.session_state.live_state
