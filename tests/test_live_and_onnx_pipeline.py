@@ -296,6 +296,44 @@ class TestLiveAndONNXPipeline(unittest.TestCase):
         avg_recv = float(np.mean(recv_times))
         self.assertLess(avg_recv, 5.0, f"Average recv latency under motion {avg_recv:.2f}ms exceeds 5ms limit")
 
+    def test_10_optical_flow_continuous_tracking_and_reversal(self):
+        """Verify sub-millisecond optical flow face reticle tracking across rapid motion and reversal."""
+        if not os.path.isfile(self.test_face_path):
+            self.skipTest("test_face.jpg not available")
+
+        img_bgr = cv2.imread(self.test_face_path)
+        h, w = img_bgr.shape[:2]
+        session = EyeSessionState()
+        ls = LiveState()
+        ls.face_box = {"x": 200, "y": 150, "w": 180, "h": 180}
+
+        import av
+        from app import MAITRIVideoProcessor
+        vp = MAITRIVideoProcessor(ls, session)
+
+        # Warmup
+        av_init = av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+        for _ in range(3):
+            vp.recv(av_init)
+
+        # Simulate 30 frames: rapid sweep right (15px/frame) then reversal left
+        latencies = []
+        for i in range(30):
+            shift_x = int(i * 12) if i < 15 else int((30 - i) * 12)
+            shift_y = int(i * 4) if i < 15 else int((30 - i) * 4)
+            M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+            shifted = cv2.warpAffine(img_bgr, M, (w, h))
+            frame = av.VideoFrame.from_ndarray(shifted, format="bgr24")
+
+            t0 = time.perf_counter()
+            out = vp.recv(frame)
+            latencies.append((time.perf_counter() - t0) * 1000.0)
+            self.assertIsNotNone(out)
+
+        vp.stop()
+        avg_lat = float(np.mean(latencies))
+        self.assertLess(avg_lat, 4.0, f"Average optical flow recv latency {avg_lat:.2f}ms exceeds 4ms limit")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

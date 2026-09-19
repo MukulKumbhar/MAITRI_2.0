@@ -477,7 +477,7 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
 
                 # 4. Passive DIP quality metrics (no pixel mutation)
                 blur_score = compute_blur_metric(face_roi)
-                is_blurry = blur_score < 20.0
+                is_blurry = blur_score < 15.0
                 mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
 
                 # 5. Deep semantic emotion classification on clean high-res crop
@@ -566,11 +566,12 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
     # Transient motion persistence / coasting window (preserves smooth tracking across fast head movements)
     if eye_session is not None and getattr(eye_session, "last_face_box", None) is not None:
         eye_session.consecutive_missing = getattr(eye_session, "consecutive_missing", 0) + 1
-        if eye_session.consecutive_missing <= 3:
+        if eye_session.consecutive_missing <= 10:
             prev_f = eye_session.last_face_res
             prev_e = eye_session.last_eye_res
             coasted_box = dict(eye_session.last_face_box)
-            coasted_conf = max(0.20, (prev_f.face_confidence if prev_f else 0.50) * 0.92)
+            coasted_decay = 0.95 ** min(eye_session.consecutive_missing, 10)
+            coasted_conf = max(0.20, (prev_f.face_confidence if prev_f else 0.50) * coasted_decay)
             coasted_probs = dict(eye_session.face_ema_probs) if getattr(eye_session, "face_ema_probs", None) else _uniform_probs()
             coasted_dom = getattr(eye_session, "face_dominant", None) or (prev_f.dominant_emotion if prev_f else "neutral")
 
@@ -578,11 +579,11 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
                 emotion_probs=coasted_probs,
                 dominant_emotion=coasted_dom,
                 face_confidence=coasted_conf,
-                face_quality=max(0.15, (prev_f.face_quality if prev_f else 0.40) * 0.90),
+                face_quality=max(0.15, (prev_f.face_quality if prev_f else 0.40) * coasted_decay),
                 annotated_img=None,
                 error=None,
                 blur_score=prev_f.blur_score if prev_f else 30.0,
-                is_blurry=False,
+                is_blurry=prev_f.is_blurry if prev_f else False,
                 dip_applied=False,
                 face_box=coasted_box,
                 smile_score=0.0,
@@ -607,7 +608,7 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
             )
             return face_res, eye_res
 
-    # MediaPipe did not detect landmarks for > 3 frames; check SSD detector fallback directly without re-running MediaPipe
+    # MediaPipe did not detect landmarks for > 10 frames; check SSD detector fallback directly without re-running MediaPipe
     ssd_res = _detect_ssd_face(work_frame, orig_w, orig_h, scale)
     if ssd_res is not None:
         if eye_session is not None:
@@ -622,13 +623,13 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         )
         return ssd_res, eye_res
 
-    # No face detected in frame
+    # No face detected in frame (lost for > 10 frames and SSD also missed)
     if eye_session is not None:
-        eye_session.face_ema_probs = None
-        eye_session.face_dominant  = None
-        eye_session.last_face_box  = None
-        eye_session.last_face_res  = None
-        eye_session.consecutive_missing = 0
+        if getattr(eye_session, "consecutive_missing", 0) > 15:
+            eye_session.face_ema_probs = None
+            eye_session.face_dominant  = None
+            eye_session.last_face_box  = None
+            eye_session.last_face_res  = None
     blur_score = compute_blur_metric(work_frame)
     no_face_res = FaceResult(
         emotion_probs=_uniform_probs(),
@@ -638,7 +639,7 @@ def process_unified_frame(bgr_frame: np.ndarray, eye_session) -> Tuple[FaceResul
         annotated_img=None,
         error=None,
         blur_score=blur_score,
-        is_blurry=blur_score < 20.0,
+        is_blurry=blur_score < 15.0,
         dip_applied=False,
         face_box=None,
         smile_score=0.0,
@@ -684,7 +685,7 @@ def _detect_ssd_face(
             bx1, by1, bx2, by2 = best_box
             face_roi = work_frame[by1:by2, bx1:bx2]
             blur_score = compute_blur_metric(face_roi)
-            is_blurry = blur_score < 20.0
+            is_blurry = blur_score < 15.0
             mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
 
             onnx_sess = _get_onnx_session()
@@ -823,7 +824,7 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
                     face_roi = bgr_frame
 
                 blur_score = compute_blur_metric(face_roi)
-                is_blurry = blur_score < 20.0
+                is_blurry = blur_score < 15.0
                 mean_brightness = float(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY))) if face_roi.size > 0 else 120.0
 
                 onnx_sess = _get_onnx_session()
@@ -882,7 +883,7 @@ def analyze_frame(bgr_frame: np.ndarray) -> FaceResult:
         annotated_img=bgr_frame,
         error=None,
         blur_score=blur_score,
-        is_blurry=blur_score < 20.0,
+        is_blurry=blur_score < 15.0,
         dip_applied=False,
         face_box=None,
         smile_score=0.0,
