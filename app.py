@@ -16,6 +16,15 @@ import numpy as np
 from typing import Optional
 import streamlit as st
 
+from modules.mission_core import NativeWatchdog, NativeDTNOutbox, compile_native_dossier
+
+MISSION_CATALOG = {
+    "ISRO Gaganyaan (LEO)": 0.5,
+    "Artemis Gateway (Lunar)": 2.4,
+    "Mars Transit (Deep Space)": 420.0
+}
+
+
 # ── Pure-Python project modules (safe to import at startup) ───────────────
 from modules.alert_module    import get_alert
 from modules.database_module import get_logs, get_recent_trend, init_db, log_event
@@ -203,6 +212,18 @@ EMO_COLORS = {
 # ─────────────────────────────────────────────────────────────────────────
 # SESSION STATE INIT & THREAD-SAFE REFERENCES
 # ─────────────────────────────────────────────────────────────────────────
+
+if "native_watchdog" not in st.session_state:
+    st.session_state.native_watchdog = NativeWatchdog()
+if "native_dtn" not in st.session_state:
+    st.session_state.native_dtn = NativeDTNOutbox()
+if "active_mission" not in st.session_state:
+    st.session_state.active_mission = "ISRO Gaganyaan (LEO)"
+if "active_crew" not in st.session_state:
+    st.session_state.active_crew = "Cdr. A. Sharma (Pilot / CMO)"
+if "dossier_md" not in st.session_state:
+    st.session_state.dossier_md = None
+
 if "live_state"   not in st.session_state:
     st.session_state.live_state   = LiveState()
 if "fusion_state" not in st.session_state:
@@ -426,140 +447,34 @@ def _get_hud_bg_slice(slice_h: int, slice_w: int) -> np.ndarray:
 
 
 def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState, display_box: Optional[dict] = None) -> np.ndarray:
-    """
-    Sleek, high-contrast semi-transparent aerospace glass HUD:
-    - Slice-based in-place alpha blending (no full frame copy, 12x lower rendering overhead)
-    - Top banner: System status, emotion badge with color indicator, confidence %, passive clarity
-    - Bottom banner: Eye EAR, blink rate, fatigue state, mission status
-    - Face reticle: Corner-bracket tactical targeting reticle with zero collision
-    """
-    snap = ls.snapshot_face_nonblocking() if hasattr(ls, "snapshot_face_nonblocking") else ls.snapshot_face()
+    snap = ls.snapshot()
     h, w = bgr.shape[:2]
-
-    # 1. Semi-transparent top aerospace banner slice (42px)
-    top_h = min(42, h)
-    top_slice = bgr[0:top_h, 0:w]
-    bg_top = _get_hud_bg_slice(top_h, w)
-    cv2.addWeighted(bg_top, 0.65, top_slice, 0.35, 0, top_slice)
-    cv2.line(bgr, (0, top_h), (w, top_h), (60, 80, 110), 1)
-
-    # 2. Semi-transparent bottom aerospace banner slice (36px)
-    bot_h = min(36, h)
-    y_bot = max(0, h - bot_h)
-    bot_slice = bgr[y_bot:h, 0:w]
-    bg_bot = _get_hud_bg_slice(bot_h, w)
-    cv2.addWeighted(bg_bot, 0.65, bot_slice, 0.35, 0, bot_slice)
-    cv2.line(bgr, (0, y_bot), (w, y_bot), (60, 80, 110), 1)
-
-    # 3. Corner-bracket face reticle
-    box = display_box if display_box is not None else snap.get("face_box")
-    emo = snap.get("face_emotion", "neutral").upper()
-    conf = snap.get("face_confidence", 0.0) * 100.0
-    is_blurry = snap.get("is_blurry", False)
-
-    EMO_HUD_COLORS = {
-        "HAPPY":     (0,   215, 255),  # Gold/Yellow
-        "NEUTRAL":   (210, 210, 210),  # Crisp White/Silver
-        "SURPRISE":  (0,   180, 255),  # Amber/Orange
-        "SAD":       (255, 140, 50),   # Cyan/Blue
-        "FEAR":      (210, 90,  210),  # Purple
-        "ANGRY":     (50,  50,  240),  # Crimson Red
-        "DISGUST":   (50,  200, 50),   # Emerald Green
-    }
-    theme_color = (0, 165, 255) if is_blurry else EMO_HUD_COLORS.get(emo, (0, 230, 118))
-
+    
+    # 1. Top and Bottom Banners
+    cv2.rectangle(bgr, (0, 0), (w, 38), (20, 25, 30), -1)
+    cv2.rectangle(bgr, (0, h - 30), (w, h), (20, 25, 30), -1)
+    
+    # 2. Face Box
+    box = snap.get("face_box")
     if box:
-        bx = max(0, min(box.get("x", 0), w - 10))
-        by = max(0, min(box.get("y", 0), h - 10))
-        bw = max(10, min(box.get("w", 0), w - bx))
-        bh = max(10, min(box.get("h", 0), h - by))
-
-        if bw > 30 and bh > 30:
-            c_len = max(14, min(bw, bh) // 5)
-            thick = 2
-
-            # Top-left corner
-            cv2.line(bgr, (bx, by), (bx + c_len, by), theme_color, thick)
-            cv2.line(bgr, (bx, by), (bx, by + c_len), theme_color, thick)
-
-            # Top-right corner
-            cv2.line(bgr, (bx + bw, by), (bx + bw - c_len, by), theme_color, thick)
-            cv2.line(bgr, (bx + bw, by), (bx + bw, by + c_len), theme_color, thick)
-
-            # Bottom-left corner
-            cv2.line(bgr, (bx, by + bh), (bx + c_len, by + bh), theme_color, thick)
-            cv2.line(bgr, (bx, by + bh), (bx, by + bh - c_len), theme_color, thick)
-
-            # Bottom-right corner
-            cv2.line(bgr, (bx + bw, by + bh), (bx + bw - c_len, by + bh), theme_color, thick)
-            cv2.line(bgr, (bx + bw, by + bh), (bx + bw, by + bh - c_len), theme_color, thick)
-
-            # Center target crosshair pip
-            cx, cy = bx + bw // 2, by + bh // 2
-            cv2.drawMarker(bgr, (cx, cy), theme_color, cv2.MARKER_CROSS, 10, 1)
-
-            # Reticle tag badge
-            reticle_lbl = f"{emo} {conf:.0f}%"
-            lbl_y = max(by - 8, top_h + 16)
-            lbl_x = max(10, min(bx, w - 120))
-            cv2.putText(bgr, reticle_lbl, (lbl_x, lbl_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, theme_color, 2, cv2.LINE_AA)
-
-    # 4. Top Banner Content (Left: Emotion Status, Right: System Telemetry)
-    if box is not None or snap.get("face_quality", 0.0) > 0.10:
-        status_text = f"● {emo}  {conf:.0f}%"
-        status_color = theme_color
-    else:
-        status_text = "◌ SCANNING ASTRONAUT..."
-        status_color = (160, 175, 190)
-
-    clarity_lbl = "BLUR GATED" if is_blurry else f"SHARP ({snap.get('blur_score', 100.0):.0f})"
-    clarity_col = (0, 165, 255) if is_blurry else (0, 230, 118)
-    telem_text = f"DIP: ISOTROPIC | {clarity_lbl} | #{snap.get('frame_count', 0)}"
-
-    (tw_status, _), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
-    (tw_telem, _), _  = cv2.getTextSize(telem_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-    x_telem = w - tw_telem - 14
-
-    if 14 + tw_status + 16 > x_telem:
-        # Compact telemetry label to guarantee zero overlap on small resolutions
-        telem_text = f"{clarity_lbl} | #{snap.get('frame_count', 0)}"
-        (tw_telem, _), _ = cv2.getTextSize(telem_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-        x_telem = w - tw_telem - 14
-
-    cv2.putText(bgr, status_text, (14, 27),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.62, status_color, 2, cv2.LINE_AA)
-    if 14 + tw_status + 10 <= x_telem:
-        cv2.putText(bgr, telem_text, (x_telem, 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, clarity_col, 1, cv2.LINE_AA)
-
-    # 5. Bottom Banner Content (Left: Eye Tracking, Right: Astronaut Vision Tag)
-    fatigue = snap.get("fatigue_label", "Normal")
-    fatigue_col = {
-        "Normal":        (0, 230, 118),
-        "Drowsy":        (0, 70, 240),
-        "Stressed Eyes": (0, 165, 255),
-        "Hyperfocused":  (0, 215, 255),
-    }.get(fatigue, (180, 180, 180))
-
-    eye_text = f"EAR: {snap.get('ear', 0.30):.2f}   BLINK: {snap.get('blink_rate', 0.0):.0f}/min   FATIGUE: {fatigue.upper()}"
-    mission_tag = "MAITRI 2.0 // ASTRONAUT VISION"
-
-    (tw_eye, _), _ = cv2.getTextSize(eye_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-    (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
-    x_tag = w - tw_tag - 14
-
-    if 14 + tw_eye + 16 > x_tag:
-        mission_tag = "MAITRI 2.0"
-        (tw_tag, _), _ = cv2.getTextSize(mission_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        x_tag = w - tw_tag - 14
-
-    cv2.putText(bgr, eye_text, (14, h - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, fatigue_col, 1, cv2.LINE_AA)
-    if 14 + tw_eye + 12 <= x_tag:
-        cv2.putText(bgr, mission_tag, (x_tag, h - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
-
+        bx, by, bw, bh = box.get("x",0), box.get("y",0), box.get("w",0), box.get("h",0)
+        if bw > 0 and bh > 0:
+            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), (0, 230, 118), 2)
+            cv2.putText(bgr, f"{snap.get('face_emotion','').upper()} {snap.get('face_confidence',0)*100:.0f}%", 
+                        (bx, max(by - 8, 38 + 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 230, 118), 2, cv2.LINE_AA)
+                        
+    # 3. Top Banner Text
+    cv2.putText(bgr, f"● {snap.get('face_emotion','').upper()} {snap.get('face_confidence',0)*100:.0f}%", (14, 27),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 230, 118), 2, cv2.LINE_AA)
+    cv2.putText(bgr, f"FRAME #{snap.get('frame_count', 0)}", (w - 140, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 165, 255), 1, cv2.LINE_AA)
+                
+    # 4. Bottom Banner Text
+    cv2.putText(bgr, f"EAR: {snap.get('ear', 0.0):.2f}  BLINK: {snap.get('blink_rate', 0.0):.0f}/min  FATIGUE: {snap.get('fatigue_label', 'Normal').upper()}", (14, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 230, 118), 1, cv2.LINE_AA)
+    cv2.putText(bgr, "MAITRI 2.0 // ASTRONAUT VISION", (w - 240, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
+                
     return bgr
 
 
@@ -574,6 +489,24 @@ st.markdown(
     "Live Multimodal AI Astronaut Telemetry &amp; Psychological Monitoring</p>",
     unsafe_allow_html=True,
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# GLOBAL ALERTS (Visible on all tabs)
+# ─────────────────────────────────────────────────────────────────────────
+if "native_watchdog" in st.session_state:
+    wd_state = st.session_state.native_watchdog.state
+    if wd_state == "CHECK_IN":
+        st.warning("⚠️ **ASTRONAUT INACTIVITY DETECTED. SYSTEM CHECK-IN REQUIRED.**")
+        if st.button("✅ Acknowledge Watchdog (Manual Override)", type="primary", use_container_width=True):
+            st.session_state.native_watchdog.acknowledge()
+            st.rerun()
+    elif wd_state == "INCAPACITATED":
+        st.error("🚨 **SYSTEM INCAPACITATION PROTOCOL ENGAGED.**")
+        if st.button("🔄 Override & Reset System", type="primary", use_container_width=True):
+            st.session_state.native_watchdog.acknowledge()
+            st.rerun()
+
+
 st.markdown("---")
 
 def _render_dip_status(is_playing: bool):
@@ -765,7 +698,16 @@ def _render_live_assessment(
     manual_face_pct = st.session_state.get("manual_face_split_slider", 60)
     manual_face_ratio = manual_face_pct / 100.0
 
+
+    # -- Watchdog Logic (Background Update Only) --
+    st.session_state.native_watchdog.update(
+        is_speaking=ls_snap.get("is_speaking", False),
+        ear=ls_snap.get("ear", 0.0),
+        face_quality=ls_snap.get("face_quality", 0.0)
+    )
+            
     fusion = fuse(
+
         state             = st.session_state.fusion_state,
         face_probs        = face_probs,
         face_quality      = face_quality,
@@ -875,7 +817,7 @@ def _render_live_assessment(
 # ─────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────
-tab_live, tab_logs = st.tabs(["🔴 Live Monitoring", "📊 Mission Logs & Trends"])
+tab_live, tab_logs, tab_demo = st.tabs(["🔴 Live Monitoring", "📊 Mission Logs & Trends", "🎬 Demo & Mission Control"])
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 1 — LIVE MONITORING
@@ -1105,3 +1047,52 @@ with tab_logs:
         if "fused_emotion" in log_df.columns:
             st.markdown("**Emotion Distribution**")
             st.bar_chart(log_df["fused_emotion"].value_counts())
+
+# ═════════════════════════════════════════════════════════════════════════
+# TAB 3 — DEMO & MISSION CONTROL
+# ═════════════════════════════════════════════════════════════════════════
+with tab_demo:
+    st.subheader("🎬 Presentation Demo Scenarios")
+    st.info("Trigger these during presentations to demonstrate autonomous safety systems without waiting 45 seconds.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⚡ Simulate Watchdog Check-In", use_container_width=True):
+            st.session_state.native_watchdog.trigger_simulation()
+            st.rerun()
+            st.success("Watchdog manually triggered. Switch to Live Telemetry to view.")
+            
+        if st.button("📄 Force Compile Medical Dossier", use_container_width=True):
+            f_state = st.session_state.fusion_state
+            stress = f_state.stress_pct if f_state else 0.0
+            st.session_state.dossier_md = compile_native_dossier(
+                st.session_state.active_crew, st.session_state.active_mission,
+                float(st.session_state.get("live_hr_slider", 75)), float(st.session_state.get("live_spo2_slider", 98)), stress
+            )
+            st.session_state.native_dtn.dispatch("AUDIT-101", "PRIORITY-1", "Manual Flight Surgeon Audit")
+            st.success("Dossier compiled successfully.")
+            
+    with col2:
+        missions = list(MISSION_CATALOG.keys())
+        idx = missions.index(st.session_state.active_mission)
+        sel_m = st.selectbox("🚀 Select Mission Profile", missions, index=idx)
+        if sel_m != st.session_state.active_mission:
+            st.session_state.active_mission = sel_m
+            st.session_state.native_dtn.set_mission(sel_m, MISSION_CATALOG[sel_m])
+            st.rerun()
+            
+        st.session_state.active_crew = st.selectbox("👨‍🚀 Active Astronaut", [
+            "Cdr. A. Sharma (Pilot / CMO)", "Lt. Cdr. P. Nair (Flight Engineer)", "Dr. V. Rao (Mission Specialist)"
+        ])
+        
+    st.markdown("---")
+    st.subheader("📡 Ground DTN Outbox")
+    st.markdown(f"**Current Propagation Delay:** {st.session_state.native_dtn.format_latency()}")
+    for pkt in st.session_state.native_dtn.packets:
+        st.warning(f"**{pkt.packet_id}** | {pkt.priority} | {pkt.status}\n\n{pkt.summary}")
+        
+    if st.session_state.dossier_md:
+        st.markdown("### 📄 Compiled Clinical Dossier")
+        st.download_button("📥 Download Dossier (.md)", st.session_state.dossier_md, "Medical_Dossier.md", "text/markdown")
+        with st.expander("Preview Dossier", expanded=True):
+            st.markdown(st.session_state.dossier_md)
