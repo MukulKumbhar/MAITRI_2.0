@@ -238,6 +238,7 @@ if "voice_detector" not in st.session_state:
 # Global references safe for background threads (aiortc workers cannot access st.session_state)
 _ACTIVE_LIVE_STATE = st.session_state.live_state
 _ACTIVE_EYE_STATE  = st.session_state.eye_state
+_ACTIVE_VOICE_DETECTOR = st.session_state.voice_detector
 
 # Eagerly pre-warm neural networks on page startup to eliminate the 1.7s initial video freeze
 if "models_warmed" not in st.session_state:
@@ -434,6 +435,37 @@ def _make_video_processor() -> MAITRIVideoProcessor:
             es = EyeSessionState()
         _ACTIVE_EYE_STATE = es
     return MAITRIVideoProcessor(ls, es)
+
+
+class MAITRIAudioProcessor:
+    """Passes audio frames from WebRTC directly to VoiceModule."""
+    def __init__(self, voice_detector):
+        self.voice_detector = voice_detector
+        self.resampler = av.AudioResampler(format='flt', layout='mono', rate=16000)
+
+    def recv(self, frame):
+        if self.voice_detector is not None:
+            try:
+                # Use PyAV's native resampler which safely handles packed/planar/stereo
+                resampled_frames = self.resampler.resample(frame)
+                for r_frame in resampled_frames:
+                    arr = r_frame.to_ndarray()
+                    arr = arr.flatten()
+                    self.voice_detector.push_audio_chunk(arr)
+            except Exception:
+                pass
+        return frame
+
+def _make_audio_processor() -> MAITRIAudioProcessor:
+    global _ACTIVE_VOICE_DETECTOR
+    vd = _ACTIVE_VOICE_DETECTOR
+    if vd is None:
+        try:
+            vd = st.session_state.voice_detector
+        except Exception:
+            vd = None
+        _ACTIVE_VOICE_DETECTOR = vd
+    return MAITRIAudioProcessor(vd)
 
 
 _HUD_BG_CACHE = {}
@@ -878,6 +910,7 @@ with tab_live:
         # Refresh thread-safe references before WebRTC worker initialization
         _ACTIVE_LIVE_STATE = st.session_state.live_state
         _ACTIVE_EYE_STATE  = st.session_state.eye_state
+        _ACTIVE_VOICE_DETECTOR = st.session_state.voice_detector
 
         # Direct synchronous WebRTC video pipeline (<1ms recv latency, locked 30 FPS, zero queue buffering delay)
         ctx = webrtc_streamer(
@@ -885,13 +918,14 @@ with tab_live:
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             video_processor_factory=_make_video_processor,
+            audio_processor_factory=_make_audio_processor,
             media_stream_constraints={
                 "video": {
                     "width": {"ideal": 640, "max": 640},
                     "height": {"ideal": 480, "max": 480},
                     "frameRate": {"ideal": 30, "max": 30},
                 },
-                "audio": False,
+                "audio": True,
             },
             async_processing=False,
         )
@@ -1064,7 +1098,7 @@ with tab_demo:
             
         if st.button("📄 Force Compile Medical Dossier", use_container_width=True):
             f_state = st.session_state.fusion_state
-            stress = f_state.stress_pct if f_state else 0.0
+            stress = f_state.last_stress if f_state else 0.0
             st.session_state.dossier_md = compile_native_dossier(
                 st.session_state.active_crew, st.session_state.active_mission,
                 float(st.session_state.get("live_hr_slider", 75)), float(st.session_state.get("live_spo2_slider", 98)), stress

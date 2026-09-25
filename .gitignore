@@ -48,3 +48,4 @@ models/*.json
 # SER training cache and audio synthesis
 .ser_cache/
 
+Report 

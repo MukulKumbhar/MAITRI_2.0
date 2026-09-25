@@ -593,6 +593,7 @@ class VoiceDetector:
             v_lock = getattr(self.live_state, "voice_lock", self.live_state.lock)
             with v_lock:
                 self.live_state.voice_available = True
+                self.voice_available = True
 
     def _audio_callback(self, indata, frames, time_info, status):
         """sounddevice callback for native 16000 Hz streams."""
