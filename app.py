@@ -482,30 +482,55 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState, display_box: Optional[di
     snap = ls.snapshot()
     h, w = bgr.shape[:2]
     
+    # Calculate responsive scale factor so text is always the same visual size 
+    # regardless of WebRTC dynamically changing the webcam resolution.
+    sf = h / 480.0
+    
+    # Emotion Colors (BGR)
+    EMO_COLORS = {
+        "happy":    (0,   255, 255), # Yellow
+        "neutral":  (210, 210, 210), # Gray
+        "surprise": (255, 255, 0),   # Cyan
+        "sad":      (255, 100, 50),  # Blue
+        "fear":     (210, 90,  210), # Purple
+        "angry":    (0,   0,   255), # Red
+        "disgust":  (0,   200, 0),   # Green
+    }
+    
+    current_emo = snap.get('face_emotion', 'neutral').lower()
+    emo_col = EMO_COLORS.get(current_emo, (0, 230, 118))
+    
     # 1. Top and Bottom Banners
-    cv2.rectangle(bgr, (0, 0), (w, 38), (20, 25, 30), -1)
-    cv2.rectangle(bgr, (0, h - 30), (w, h), (20, 25, 30), -1)
+    top_h = int(38 * sf)
+    bot_h = int(30 * sf)
+    cv2.rectangle(bgr, (0, 0), (w, top_h), (20, 25, 30), -1)
+    cv2.rectangle(bgr, (0, h - bot_h), (w, h), (20, 25, 30), -1)
     
     # 2. Face Box
     box = snap.get("face_box")
     if box:
         bx, by, bw, bh = box.get("x",0), box.get("y",0), box.get("w",0), box.get("h",0)
         if bw > 0 and bh > 0:
-            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), (0, 230, 118), 2)
-            cv2.putText(bgr, f"{snap.get('face_emotion','').upper()} {snap.get('face_confidence',0)*100:.0f}%", 
-                        (bx, max(by - 8, 38 + 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 230, 118), 2, cv2.LINE_AA)
+            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), emo_col, max(1, int(2 * sf)))
+            
+            # Draw Face Label
+            lbl = f"{current_emo.upper()} {snap.get('face_confidence',0)*100:.0f}%"
+            lbl_y = max(by - int(8 * sf), top_h + int(16 * sf))
+            cv2.putText(bgr, lbl, (bx, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sf, emo_col, max(1, int(2 * sf)), cv2.LINE_AA)
                         
     # 3. Top Banner Text
-    cv2.putText(bgr, f"● {snap.get('face_emotion','').upper()} {snap.get('face_confidence',0)*100:.0f}%", (14, 27),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 230, 118), 2, cv2.LINE_AA)
-    cv2.putText(bgr, f"FRAME #{snap.get('frame_count', 0)}", (w - 140, 26),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 165, 255), 1, cv2.LINE_AA)
+    lbl_top = f"● {current_emo.upper()} {snap.get('face_confidence',0)*100:.0f}%"
+    cv2.putText(bgr, lbl_top, (int(14 * sf), int(27 * sf)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62 * sf, emo_col, max(1, int(2 * sf)), cv2.LINE_AA)
+    cv2.putText(bgr, f"FRAME #{snap.get('frame_count', 0)}", (w - int(140 * sf), int(26 * sf)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44 * sf, (0, 165, 255), 1, cv2.LINE_AA)
                 
     # 4. Bottom Banner Text
-    cv2.putText(bgr, f"EAR: {snap.get('ear', 0.0):.2f}  BLINK: {snap.get('blink_rate', 0.0):.0f}/min  FATIGUE: {snap.get('fatigue_label', 'Normal').upper()}", (14, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 230, 118), 1, cv2.LINE_AA)
-    cv2.putText(bgr, "MAITRI 2.0 // ASTRONAUT VISION", (w - 240, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (150, 165, 180), 1, cv2.LINE_AA)
+    bot_lbl = f"EAR: {snap.get('ear', 0.0):.2f}  BLINK: {snap.get('blink_rate', 0.0):.0f}/min  FATIGUE: {snap.get('fatigue_label', 'Normal').upper()}"
+    cv2.putText(bgr, bot_lbl, (int(14 * sf), h - int(10 * sf)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44 * sf, (0, 230, 118), 1, cv2.LINE_AA)
+    cv2.putText(bgr, "MAITRI 2.0 // ASTRONAUT VISION", (w - int(240 * sf), h - int(10 * sf)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40 * sf, (150, 165, 180), 1, cv2.LINE_AA)
                 
     return bgr
 
@@ -912,6 +937,28 @@ with tab_live:
         _ACTIVE_EYE_STATE  = st.session_state.eye_state
         _ACTIVE_VOICE_DETECTOR = st.session_state.voice_detector
 
+        if "cam_active" not in st.session_state:
+            st.session_state.cam_active = False
+
+        col_cam1, col_cam2 = st.columns([1, 2])
+        with col_cam1:
+            if st.session_state.cam_active:
+                if st.button("🛑 Stop Stream", use_container_width=True):
+                    st.session_state.cam_active = False
+                    st.rerun()
+            else:
+                if st.button("▶️ Start Stream", type="primary", use_container_width=True):
+                    st.session_state.cam_active = True
+                    st.rerun()
+        
+        with col_cam2:
+            use_audio = st.checkbox("🎙️ Enable Microphone (Disable if you get 'NotReadableError')", value=True)
+
+        st.markdown(
+            "<style>#maitri-live button { display: none !important; }</style>",
+            unsafe_allow_html=True
+        )
+
         # Direct synchronous WebRTC video pipeline (<1ms recv latency, locked 30 FPS, zero queue buffering delay)
         ctx = webrtc_streamer(
             key="maitri-live",
@@ -919,13 +966,14 @@ with tab_live:
             rtc_configuration=rtc_config,
             video_processor_factory=_make_video_processor,
             audio_processor_factory=_make_audio_processor,
+            desired_playing_state=st.session_state.cam_active,
             media_stream_constraints={
                 "video": {
                     "width": {"ideal": 640, "max": 640},
                     "height": {"ideal": 480, "max": 480},
                     "frameRate": {"ideal": 30, "max": 30},
                 },
-                "audio": True,
+                "audio": use_audio,
             },
             async_processing=False,
         )
