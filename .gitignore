@@ -44,8 +44,12 @@ wheels/
 models/*.onnx
 models/*.task
 models/*.json
+models/*.gguf
+models/piper_voice/
+models/whisper_tiny_en/
+models/
 
 # SER training cache and audio synthesis
 .ser_cache/
 
-Report 
+Report site_packages/

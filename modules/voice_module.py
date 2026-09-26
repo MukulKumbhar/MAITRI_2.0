@@ -541,9 +541,9 @@ class VoiceDetector:
         self,
         live_state=None,
         chunk_duration_sec: float = 3.0,
-        silence_threshold: float = 0.030,
-        gain: float = 1.0,
-        hangover_sec: float = 0.45,
+        silence_threshold: float = 0.015,
+        gain: float = 1.6,
+        hangover_sec: float = 1.0,
     ):
         self.live_state         = live_state
         self.target_rate        = 16000
@@ -743,6 +743,74 @@ class VoiceDetector:
             sleep_time = max(0.02, fast_cadence - elapsed)
             time.sleep(sleep_time)
 
+    def restart_stream(self) -> bool:
+        """Safely restart / reconnect the background microphone stream."""
+        with self._lock:
+            if self._sd_stream is not None:
+                try:
+                    self._sd_stream.stop()
+                    self._sd_stream.close()
+                except Exception:
+                    pass
+                self._sd_stream = None
+
+        stream_started = False
+        try:
+            import sounddevice as sd
+            for dev in ["default", "sysdefault", None]:
+                try:
+                    stream = sd.InputStream(
+                        device=dev,
+                        samplerate=self.target_rate,
+                        channels=1,
+                        dtype="float32",
+                        blocksize=1024,
+                        callback=self._audio_callback,
+                    )
+                    stream.start()
+                    with self._lock:
+                        self._sd_stream = stream
+                        self.voice_available = True
+                    stream_started = True
+                    print(f"[VoiceModule] Microphone stream started on device '{dev}' @ 16000 Hz.")
+                    break
+                except Exception:
+                    try:
+                        dev_info = sd.query_devices(dev)
+                        hw_rate = int(dev_info.get("default_samplerate", 48000))
+                        self._hw_rate = hw_rate
+                        stream = sd.InputStream(
+                            device=dev,
+                            samplerate=hw_rate,
+                            channels=1,
+                            dtype="float32",
+                            blocksize=2048,
+                            callback=self._audio_callback_resampled,
+                        )
+                        stream.start()
+                        with self._lock:
+                            self._sd_stream = stream
+                            self.voice_available = True
+                        stream_started = True
+                        print(f"[VoiceModule] Microphone stream on '{dev}' @ {hw_rate} Hz (→ 16 kHz).")
+                        break
+                    except Exception:
+                        continue
+        except Exception as exc:
+            print(f"[VoiceModule] Sounddevice init warning: {exc}.")
+
+        if not stream_started:
+            print("[VoiceModule] Notice: Operating in WebRTC buffer-only mode.")
+            with self._lock:
+                self.voice_available = False
+
+        if self.live_state is not None:
+            v_lock = getattr(self.live_state, "voice_lock", self.live_state.lock)
+            with v_lock:
+                self.live_state.voice_available = self.voice_available
+
+        return stream_started
+
     def start(self):
         """Start background audio capture and dual-model inference engine."""
         if self._running:
@@ -761,60 +829,7 @@ class VoiceDetector:
             pass
 
         # Resilient device discovery (PipeWire / ALSA / JACK)
-        try:
-            import sounddevice as sd
-            stream_started = False
-
-            for dev in ["sysdefault", "default", None]:
-                try:
-                    stream = sd.InputStream(
-                        device=dev,
-                        samplerate=self.target_rate,
-                        channels=1,
-                        dtype="float32",
-                        blocksize=1024,
-                        callback=self._audio_callback,
-                    )
-                    stream.start()
-                    self._sd_stream  = stream
-                    self.voice_available = True
-                    stream_started   = True
-                    print(f"[VoiceModule] Microphone stream started on device '{dev}' @ 16000 Hz.")
-                    break
-                except Exception:
-                    try:
-                        dev_info = sd.query_devices(dev)
-                        hw_rate  = int(dev_info.get("default_samplerate", 48000))
-                        self._hw_rate = hw_rate
-                        stream = sd.InputStream(
-                            device=dev,
-                            samplerate=hw_rate,
-                            channels=1,
-                            dtype="float32",
-                            blocksize=2048,
-                            callback=self._audio_callback_resampled,
-                        )
-                        stream.start()
-                        self._sd_stream  = stream
-                        self.voice_available = True
-                        stream_started   = True
-                        print(f"[VoiceModule] Microphone stream on '{dev}' @ {hw_rate} Hz (→ 16 kHz).")
-                        break
-                    except Exception:
-                        continue
-
-            if not stream_started:
-                print("[VoiceModule] Notice: Operating in WebRTC buffer-only mode.")
-                self.voice_available = False
-
-        except Exception as exc:
-            print(f"[VoiceModule] Sounddevice init warning: {exc}.")
-            self.voice_available = False
-
-        if self.live_state is not None:
-            v_lock = getattr(self.live_state, "voice_lock", self.live_state.lock)
-            with v_lock:
-                self.live_state.voice_available = self.voice_available
+        self.restart_stream()
 
         self._worker_thread = threading.Thread(
             target=self._worker_loop, daemon=True, name="maitri-voice-worker"

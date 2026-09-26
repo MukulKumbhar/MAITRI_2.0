@@ -37,3 +37,7 @@ aiortc>=1.8.0
 # soundfile>=0.12.1
 # librosa>=0.10.1
 
+# ── Phase 2: Conversational AI (CPU-only) ──────────────────────────────
+llama-cpp-python>=0.3.0    # local LLM inference (Phi-3-Mini GGUF)
+faster-whisper>=1.0.0      # CPU-optimised ASR (Whisper tiny.en)
+piper-tts>=1.8.0           # offline neural TTS (Piper lessac-medium)

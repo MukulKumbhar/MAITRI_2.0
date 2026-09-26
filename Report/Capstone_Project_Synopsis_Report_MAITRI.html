@@ -1,0 +1,1304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAITRI — Capstone Project Synopsis Report</title>
+<style>
+  @page {
+    size: A4 portrait;
+    margin: 22mm 16mm 22mm 16mm;
+    @top-center {
+      content: "Annasaheb Dange College of Engineering and Technology, Ashta";
+      font-size: 8pt;
+      color: #666;
+    }
+    @bottom-center {
+      content: "Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra | Website: www.adcet.ac.in";
+      font-size: 7.5pt;
+      color: #888;
+    }
+    @bottom-right {
+      content: counter(page);
+      font-size: 8pt;
+    }
+  }
+
+  body {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #111;
+    background-color: #fff;
+    margin: 0;
+    padding: 0;
+  }
+
+  .page-break {
+    page-break-before: always;
+    break-before: page;
+  }
+
+  /* TVS Template Running Header */
+  .tvs-header {
+    text-align: center;
+    border-bottom: 1.5px solid #1e3a8a;
+    padding-bottom: 6px;
+    margin-bottom: 22px;
+  }
+  .tvs-header h3 {
+    margin: 0;
+    font-size: 11.5pt;
+    font-weight: bold;
+    color: #0f172a;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .tvs-header h4 {
+    margin: 2px 0;
+    font-size: 9pt;
+    font-weight: normal;
+    color: #475569;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .tvs-header .dept-title {
+    font-size: 9.5pt;
+    font-weight: bold;
+    color: #1e3a8a;
+    margin-top: 3px;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .tvs-header .accreditation {
+    font-size: 8pt;
+    color: #64748b;
+    margin-top: 1px;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  /* TVS Running Footer */
+  .tvs-footer {
+    border-top: 1px solid #cbd5e1;
+    padding-top: 5px;
+    margin-top: 30px;
+    font-size: 8pt;
+    color: #64748b;
+    display: flex;
+    justify-content: space-between;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  /* Title Page */
+  .title-page {
+    text-align: center;
+    padding: 20px 10px;
+  }
+  .title-page .doc-header {
+    font-size: 13pt;
+    font-weight: bold;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #1e3a8a;
+    margin-bottom: 10px;
+  }
+  .title-page .project-title {
+    font-size: 18pt;
+    font-weight: bold;
+    color: #0f172a;
+    margin: 15px 0 5px 0;
+    font-family: Arial, Helvetica, sans-serif;
+    line-height: 1.3;
+  }
+  .title-page .project-sub {
+    font-size: 12pt;
+    font-style: italic;
+    color: #475569;
+    margin-bottom: 25px;
+  }
+  .title-page .fulfillment {
+    font-size: 10pt;
+    margin: 15px 0;
+    color: #334155;
+  }
+  .title-page .degree {
+    font-size: 12pt;
+    font-weight: bold;
+    color: #0f172a;
+    font-family: Arial, Helvetica, sans-serif;
+    text-transform: uppercase;
+    margin: 5px 0;
+  }
+
+  /* Section Headings matching TVS */
+  h1.tvs-section {
+    font-size: 13pt;
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold;
+    color: #0f172a;
+    margin-top: 24px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 3px;
+  }
+  h2.tvs-sub-section {
+    font-size: 11.5pt;
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold;
+    color: #1e293b;
+    margin-top: 16px;
+    margin-bottom: 6px;
+  }
+  h3.tvs-sub-sub {
+    font-size: 10.5pt;
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold;
+    color: #334155;
+    margin-top: 12px;
+    margin-bottom: 4px;
+  }
+
+  p {
+    margin: 0 0 10px 0;
+    text-align: justify;
+    text-justify: inter-word;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 9.5pt;
+  }
+  table, th, td {
+    border: 1px solid #cbd5e1;
+  }
+  th {
+    background-color: #f1f5f9;
+    color: #0f172a;
+    font-weight: bold;
+    text-align: left;
+    padding: 6px 8px;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  td {
+    padding: 6px 8px;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background-color: #f8fafc;
+  }
+
+  /* Bullet lists */
+  ul, ol {
+    margin: 0 0 12px 20px;
+    padding: 0;
+  }
+  li {
+    margin-bottom: 5px;
+  }
+
+  /* ASCII Architecture Box */
+  pre {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding: 12px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    line-height: 1.35;
+    border-radius: 4px;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 14px 0;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 8pt;
+    font-weight: bold;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+  .badge-implemented {
+    background-color: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+  }
+  .badge-proposed {
+    background-color: #e0f2fe;
+    color: #075985;
+    border: 1px solid #7dd3fc;
+  }
+
+  .sig-block {
+    margin-top: 30px;
+    display: flex;
+    justify-content: space-between;
+    text-align: center;
+  }
+  .sig-item {
+    width: 45%;
+  }
+  .sig-line {
+    border-top: 1px dashed #475569;
+    margin-top: 40px;
+    padding-top: 5px;
+    font-weight: bold;
+    font-size: 9.5pt;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  @media screen {
+    body {
+      max-width: 900px;
+      margin: 20px auto;
+      padding: 30px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.1);
+      border-radius: 6px;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- RUNNING HEADER -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<!-- TITLE PAGE -->
+<div class="title-page">
+  <div class="doc-header">Capstone Project Synopsis on</div>
+  <div class="project-title">MAITRI: Multimodal AI-based Astronaut Telemetry & Real-time Intelligence</div>
+  <div class="project-sub">(Multimodal Astronaut Psychological Well-being and Emotional Support System)</div>
+
+  <div class="fulfillment">
+    Submitted in partial fulfillment of the requirements for the Capstone Project of
+    <div class="degree">Bachelor of Technology</div>
+    in
+    <div class="degree" style="color: #1e3a8a;">Aeronautical Engineering</div>
+    <em>(Minor in Aerospace Engineering / Department of Computer Science & Engineering)</em>
+  </div>
+
+  <div style="margin: 20px 0;">
+    <p style="font-weight: bold; margin-bottom: 6px; font-family: Arial, Helvetica, sans-serif;">Submitted by</p>
+    <table style="width: 85%; margin: 0 auto; font-size: 9.5pt;">
+      <thead>
+        <tr>
+          <th>Roll No / URN</th>
+          <th>Name of the Student</th>
+          <th>Branch & Degree</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>23031012</strong></td>
+          <td><strong>Mr. Mukul Ramesh Kumbhar</strong></td>
+          <td>B.Tech (Computer Science & Engg.)</td>
+        </tr>
+        <tr>
+          <td><strong>23031016</strong></td>
+          <td><strong>Mr. Aditya Ananda Kumbhar</strong></td>
+          <td>B.Tech (Computer Science & Engg.)</td>
+        </tr>
+        <tr>
+          <td><strong>23101058</strong></td>
+          <td><strong>Mr. Aryan Amarsinh Patil</strong></td>
+          <td>B.Tech (CSE - Internet of Things)</td>
+        </tr>
+        <tr>
+          <td><strong>23041084</strong></td>
+          <td><strong>Mr. Shreedhar Suresh Dalvi</strong></td>
+          <td>B.Tech (Electrical Engineering)</td>
+        </tr>
+        <tr>
+          <td><strong>23101007</strong></td>
+          <td><strong>Ms. Pranjal Sampatrao Mane</strong></td>
+          <td>B.Tech (CSE - Internet of Things)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top: 25px;">
+    <p style="font-weight: bold; margin-bottom: 4px; font-family: Arial, Helvetica, sans-serif;">Under the Guidance of</p>
+    <p style="font-size: 12pt; font-weight: bold; margin: 0; color: #1e3a8a;">Dr. SAKTHIPRIYA BALU</p>
+    <p style="font-size: 10pt; color: #555; margin: 2px 0;">Assistant Professor & Project Supervisor</p>
+  </div>
+
+  <div style="margin-top: 25px;">
+    <p style="font-weight: bold; margin: 0; text-transform: uppercase;">Department of Aeronautical Engineering</p>
+    <p style="font-size: 9pt; margin: 2px 0;">Sant Dnyaneshwar Shikshan Sanstha's</p>
+    <h3 style="margin: 4px 0; font-size: 12pt;">Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+    <p style="font-size: 9pt; margin: 0;">(An Empowered Autonomous Institute)</p>
+    <p style="font-size: 10pt; font-weight: bold; margin-top: 3px;">Shivaji University, Kolhapur</p>
+    <p style="font-size: 9.5pt; font-weight: bold;">Academic Year: 2025–2026</p>
+  </div>
+</div>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SPONSORSHIP CERTIFICATE -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section" style="text-align: center; border-bottom: none; margin-top: 15px;">Sponsorship Certificate / Certificate of Institutional Approval</h1>
+
+<p style="margin-top: 25px;">
+This is to certify that the Capstone Project Synopsis entitled:
+</p>
+<p style="text-align: center; font-size: 12pt; font-weight: bold; color: #1e3a8a; margin: 15px 0;">
+"MAITRI: Multimodal AI-based Astronaut Telemetry & Real-time Intelligence (Multimodal Astronaut Psychological Well-being and Emotional Support System)"
+</p>
+<p>
+is a bonafide proposal submitted by:
+</p>
+<ul>
+  <li><strong>Mr. MUKUL RAMESH KUMBHAR</strong> (URN: 23031012)</li>
+  <li><strong>Mr. ADITYA ANANDA KUMBHAR</strong> (URN: 23031016)</li>
+  <li><strong>Mr. ARYAN AMARSINH PATIL</strong> (URN: 23101058)</li>
+  <li><strong>Mr. SHREEDHAR SURESH DALVI</strong> (URN: 23041084)</li>
+  <li><strong>Ms. PRANJAL SAMPATRAO MANE</strong> (URN: 23101007)</li>
+</ul>
+<p>
+in partial fulfillment of the requirements for the award of the degree of <strong>Bachelor of Technology in Aeronautical Engineering (Minor in Aerospace Engineering)</strong> at <strong>Annasaheb Dange College of Engineering and Technology (ADCET), Ashta</strong>, affiliated to <strong>Shivaji University, Kolhapur</strong>, during the academic year 2025–2026.
+</p>
+<p>
+The project proposal has been evaluated and approved in accordance with ADCET Capstone Project Regulations (<em>Ref: ADCET/Aero/Project/Regulations-2025, Rev-0, Dated 01/01/2025</em>).
+</p>
+
+<div class="sig-block" style="margin-top: 50px;">
+  <div class="sig-item">
+    <div class="sig-line">Dr. SAKTHIPRIYA BALU<br><span style="font-weight: normal; font-size: 9pt;">Project Supervisor / Guide<br>Dept. of Aeronautical Engineering</span></div>
+  </div>
+  <div class="sig-item">
+    <div class="sig-line">Dr. AMOL S. DANGE<br><span style="font-weight: normal; font-size: 9pt;">Capstone Project Coordinator<br>Dept. of Aeronautical Engineering</span></div>
+  </div>
+</div>
+
+<div class="sig-block" style="margin-top: 45px;">
+  <div class="sig-item">
+    <div class="sig-line">Head of Department<br><span style="font-weight: normal; font-size: 9pt;">Dept. of Aeronautical Engineering<br>ADCET, Ashta</span></div>
+  </div>
+  <div class="sig-item">
+    <div class="sig-line">Director<br><span style="font-weight: normal; font-size: 9pt;">ADCET, Ashta<br>(Autonomous Institute)</span></div>
+  </div>
+</div>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ABSTRACT -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">Abstract</h1>
+<p>
+During Long-Duration Spaceflight (LDSF) missions—such as deep-space lunar transit, Martian orbital habitats, and planetary surface expeditions—astronaut crews are exposed to persistent, extreme physiological and psychological stressors. Microgravity-induced cephalic fluid shifts, confinement within restricted habitable volumes, monotonous nutrition, circadian rhythm disruption from artificial lighting, and high-consequence operational workloads collectively induce acute cognitive fatigue, affective blunting, and psychosomatic strain. Compounding this challenge, the vast interplanetary distances introduce electromagnetic communication latencies ranging from 3 to 22 minutes each way (resulting in up to 44 minutes roundtrip delay for Mars), completely eliminating the possibility of real-time terrestrial tele-counseling from Earth-based flight psychologists. Furthermore, operational spaceflight culture frequently encourages astronauts to suppress subjective distress, allowing acute psychological degradation to proceed unnoticed until it precipitates catastrophic operational errors.
+</p>
+<p>
+To address this aerospace healthcare challenge, this project develops <strong>MAITRI (Multimodal AI-based Astronaut Telemetry & Real-time Intelligence)</strong>, an autonomous, completely offline, edge-native multimodal monitoring and closed-loop affective support architecture. The system is architected into two clearly defined development phases:
+</p>
+<ol>
+  <li>
+    <strong>Phase 1 (Existing Implemented Foundation):</strong> A high-throughput, decoupled multimodal monitoring subsystem operating locally at 30 FPS without cloud dependency. Upgraded from an initial high-latency VGG-Face baseline, Phase 1 integrates an optimized EfficientNet-B2 ONNX model (<code>enet_b2_7.onnx</code>) running in ~6.3 ms for Facial Emotion Recognition (FER), a 478-point 3D landmark mesh (MediaPipe Tasks) computing Eye Aspect Ratio (EAR) and rolling 60-second blink rates with reading-stupor hysteresis, a Digital Audio Processing (DAP) pipeline with a 75 Hz infrasonic high-pass filter that eliminates spacecraft life-support cooling fan noise (ALC257 rumble), a heuristic laughter/sobbing reflex bypass ($R_{\text{env}} \sim 0.90$), and an SNR-weighted dual-model Speech Emotion Recognition (SER) ensemble (Wav2Vec2 ONNX + synthetically trained MFCC-MLP ONNX). These streams are fused via a dynamic, Quality-Gated Exponential Moving Average (EMA, &alpha;=0.15) engine that calculates a unified Stress Index (0–100%), incorporates physical exertion cross-validation, and drives an inactivity watchdog, Delay-Tolerant Networking (DTN) ground outbox simulator, and SQLite telemetry database (<code>maitri_logs.db</code>).
+  </li>
+  <li>
+    <strong>Phase 2 (Proposed Closed-Loop Support Development):</strong> A safety-gated, closed-loop, offline affective support architecture operating under the operational paradigm <strong>Sense &rarr; Assess &rarr; Select &rarr; Support &rarr; Reassess &rarr; Adapt</strong>. Phase 2 consumes structured 1 Hz telemetry snapshots via a read-only State Gateway, filters transient emotional noise through temporal persistence slopes, and drives a deterministic 6-State Finite State Machine (FSM) governed by dwell-time hysteresis (15s) and refractory cooldown timers (180s) to eliminate intervention flapping. Non-pharmacological countermeasures (Box Breathing 4-4-4-4, 4-7-8 parasympathetic regulation, 5-4-3-2-1 sensory grounding) are administered via a retrieval-grounded local knowledge base, a quantized open-weights conversational LLM bounded by strict pre- and post-generation safety gates, offline speech I/O (<code>faster-whisper</code> + Piper TTS), and tempo-regulated psychoacoustic adaptive audio (60–70 BPM). A closed-loop feedback engine evaluates post-intervention affective differentials (&Delta;Stress) and discrete astronaut feedback to adapt support policies or deterministically escalate emergencies to ground control.
+  </li>
+</ol>
+<p>
+<strong>Keywords:</strong> Multimodal Affective Computing, Astronaut Psychological Well-being, Delay-Tolerant Networking (DTN), Edge AI, Closed-Loop Behavioral Countermeasures, Finite State Machine, Cognitive Behavioral Therapy (CBT), Inactivity Watchdog.
+</p>
+
+<!-- CONTENTS -->
+<h1 class="tvs-section" style="margin-top: 25px;">Contents</h1>
+<table style="border: none;">
+  <tr style="border: none;"><td style="border: none;"><strong>Abstract</strong></td><td style="text-align: right; border: none;">i</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>Sponsorship Certificate</strong></td><td style="text-align: right; border: none;">ii</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>1 Introduction</strong></td><td style="text-align: right; border: none;">1</td></tr>
+  <tr style="border: none;"><td style="border: none; padding-left: 20px;">1.1 Background and Context</td><td style="text-align: right; border: none;">1</td></tr>
+  <tr style="border: none;"><td style="border: none; padding-left: 20px;">1.2 Purpose</td><td style="text-align: right; border: none;">1</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>2 Literature Survey</strong></td><td style="text-align: right; border: none;">2</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>3 Problem Statement</strong></td><td style="text-align: right; border: none;">4</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>4 Objectives</strong></td><td style="text-align: right; border: none;">5</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>5 Scope</strong></td><td style="text-align: right; border: none;">6</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>6 Proposed Work</strong></td><td style="text-align: right; border: none;">7</td></tr>
+  <tr style="border: none;"><td style="border: none; padding-left: 20px;">6.1 Methodology (Modules, Techniques, Algorithms, Architecture)</td><td style="text-align: right; border: none;">7</td></tr>
+  <tr style="border: none;"><td style="border: none; padding-left: 20px;">6.2 Software and Hardware requirements and availability</td><td style="text-align: right; border: none;">20</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>7 Expected Outcome</strong></td><td style="text-align: right; border: none;">22</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>8 Schedule</strong></td><td style="text-align: right; border: none;">23</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>Expected Challenges, Risks, and Mitigation Strategies</strong></td><td style="text-align: right; border: none;">24</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>References</strong></td><td style="text-align: right; border: none;">25</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>Details of Team Members</strong></td><td style="text-align: right; border: none;">27</td></tr>
+  <tr style="border: none;"><td style="border: none;"><strong>Annexure - I: ADCET Capstone Project Proposal (Proforma - I)</strong></td><td style="text-align: right; border: none;">28</td></tr>
+</table>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 1: INTRODUCTION -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">1 Introduction</h1>
+<p>
+Astronaut psychological health and cognitive readiness represent mission-critical determinants of success in human space exploration. During long-duration missions aboard orbital space stations or deep-space transit vehicles, crew members endure prolonged sensory deprivation, chronic isolation, high-stress operational schedules, and severe environmental confinement. Traditional mission operations have relied upon real-time tele-counseling with Earth-based flight surgeons. However, beyond Low Earth Orbit, transmission delays and communication blackouts render continuous Earth-dependent psychiatric support impossible.
+</p>
+<p>
+With the advent of high-performance edge artificial intelligence and multimodal perception algorithms, automated systems can now monitor human physiological and psychological states locally. By embedding edge computing directly into spacecraft habitat avionics, it becomes possible to continuously assess astronaut well-being, eliminate single-sensor ambiguities, and deploy autonomous behavioral countermeasures without requiring cloud connectivity.
+</p>
+<p>
+The <strong>MAITRI (Multimodal AI-based Astronaut Telemetry & Real-time Intelligence)</strong> system is designed to provide an autonomous, privacy-preserving, edge-native solution for monitoring and supporting astronaut psychological well-being. Operating 100% offline, MAITRI fuses computer vision, speech acoustics, and vital telemetry into an objective stress index and couples it with a deterministic, safety-gated support policy engine that delivers adaptive, closed-loop psychological countermeasures.
+</p>
+
+<h2 class="tvs-sub-section">1.1 Background and Context</h2>
+<p>
+In deep-space exploration missions (such as ISRO Gaganyaan/BAS, NASA Artemis, and crewed Mars expeditions), crews face physical and psychological isolation unprecedented in human history. Astronauts live and work inside tightly confined pressurized volumes subjected to constant acoustic hum from Environmental Control and Life Support Systems (ECLSS), microgravity-induced cephalic fluid shifts, circadian desynchronization, and the profound psychological phenomenon known as the "Earth-out-of-view" effect.
+</p>
+<p>
+Under terrestrial conditions, private psychological conferences (PPCs) occur regularly between astronauts and terrestrial operational psychologists. However, for interplanetary transit to Mars, the one-way speed-of-light propagation delay varies between 3 and 22 minutes (&tau;<sub>delay</sub> = d<sub>propagation</sub> / c). This latency produces a minimum roundtrip conversational lag of 6 to 44 minutes, completely precluding interactive tele-counseling or crisis de-escalation. Furthermore, during solar conjunction, communication links between Earth and Mars are completely severed for up to several weeks due to solar radio interference.
+</p>
+<p>
+In addition to physical communication constraints, operational spaceflight culture frequently encourages crew members to suppress subjective fatigue, anxiety, or interpersonal friction to maintain flight status. Retrospective analyses from terrestrial isolation analog studies (such as the 520-day Mars500 experiment) confirm that psychological degradation manifests insidiously, often undetected until cognitive failure impairs mission safety. Consequently, space agencies have identified autonomous medical decision support as a high-priority technology gap.
+</p>
+
+<h2 class="tvs-sub-section">1.2 Purpose</h2>
+<p>
+The main purpose of the <strong>MAITRI</strong> system is to develop an edge-native, zero-cloud, multimodal monitoring and closed-loop affective support system that maintains astronaut psychological well-being and operational performance during long-duration space missions.
+</p>
+<p>The system is intended to:</p>
+<ul>
+  <li>Continuously and non-invasively monitor astronaut affective states, eye fatigue, vocal prosody, and physiological vitals using standard cabin sensors.</li>
+  <li>Synthesize disparate sensory inputs into a standardized, anti-flicker Stress Index (0–100%) governed by dynamic quality gating and temporal smoothing.</li>
+  <li>Disambiguate healthy operational activities from true psychological distress through context-aware cross-validation (e.g., distinguishing treadmill exercise tachycardia from acute panic, and quiet manual reading from catatonic stupor).</li>
+  <li>Administer evidence-based, non-pharmacological behavioral countermeasures (Cognitive Behavioral Therapy protocols, paced somatic breathing, and adaptive audio) via a deterministic Finite State Machine (FSM).</li>
+  <li>Enforce strict deterministic safety gating around conversational AI components, ensuring that emergency escalations bypass generative models.</li>
+  <li>Close the loop through post-intervention affective reassessment, verifying stabilization and adapting subsequent support policies.</li>
+  <li>Safeguard mission telemetry through an embedded SQLite mission database and a Delay-Tolerant Networking (DTN) ground outbox simulator that queues priority alerts for Earth synchronization.</li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 2: LITERATURE SURVEY -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">2 Literature Survey</h1>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 7%;">Year</th>
+      <th style="width: 17%;">System / Paper</th>
+      <th style="width: 26%;">Methodology</th>
+      <th style="width: 17%;">Advantages</th>
+      <th style="width: 16%;">Limitations</th>
+      <th style="width: 17%;">Relevance to MAITRI</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1997</strong></td>
+      <td>Picard, R. W.<br><em>(MIT Press)</em></td>
+      <td>Foundational <em>Affective Computing</em> theory; mapping emotions via autonomic biosignals (GSR, HR, EMG) and facial markers.</td>
+      <td>Established formal mathematical framework for affective modeling and human-machine emotional interaction.</td>
+      <td>Lacked real-time video/audio processing capacity; relied on obtrusive wired sensors.</td>
+      <td>Provides theoretical grounding for MAITRI's multi-sensor emotional inference and physiological strain scaling.</td>
+    </tr>
+    <tr>
+      <td><strong>2007</strong></td>
+      <td>Dinges, D. F., et al.<br><em>(NASA/CR-2007-214811)</em></td>
+      <td>Optical Computer Recognition (OCR) of facial expressions using FACS Action Units to track stress and fatigue during analog space tasks.</td>
+      <td>Demonstrated optical tracking of facial action units reliably tracks acute stress without electrodes.</td>
+      <td>Computationally intensive; highly sensitive to cabin lighting and head pose; lacked an active intervention loop.</td>
+      <td>Directly inspires MAITRI's optical affect tracking, highlighting the necessity of Digital Image Processing (DIP) preprocessing.</td>
+    </tr>
+    <tr>
+      <td><strong>2014</strong></td>
+      <td>Basner, M., et al.<br><em>(PLoS ONE)</em></td>
+      <td>Behavioral and psychological assessment during 520-day Mars analog confinement (Mars500) using vigilance tests and self-reports.</td>
+      <td>Proved psychological degradation in LDSF is heterogeneous (hypokinesis, depressive symptoms) and progresses insidiously.</td>
+      <td>Retrospective analysis relying primarily on self-reported questionnaires; lacked real-time autonomous closed-loop mitigation.</td>
+      <td>Validates the mission necessity of MAITRI's continuous multi-factor monitoring and objective inactivity watchdog.</td>
+    </tr>
+    <tr>
+      <td><strong>2016</strong></td>
+      <td>Soukupova, T., &amp; Cech, J.<br><em>(CVWW)</em></td>
+      <td>Real-Time Eye Blink Detection using Facial Landmarks and the Eye Aspect Ratio (EAR) metric derived from 2D camera frames.</td>
+      <td>Highly efficient, real-time geometric scalar (&lt;1 ms computation); invariant to uniform scale and minor head rotations.</td>
+      <td>Static thresholds trigger false alarms during tasks involving variable gaze angles or downward reading postures.</td>
+      <td>Forms the algorithmic baseline for MAITRI's Module 2, extended with dynamic baseline calibration and reading hysteresis.</td>
+    </tr>
+    <tr>
+      <td><strong>2018</strong></td>
+      <td>Toups, P. O., et al.<br><em>(NASA Tech Memo)</em></td>
+      <td>Autonomous Medical Decision Support (AMDS) concepts for exploration-class space missions, formalizing clinical guidance autonomy.</td>
+      <td>Defined operational tiers for medical autonomy under extreme communication latency.</td>
+      <td>Architectural specification without an integrated live multimodal software implementation or affective intervention pipeline.</td>
+      <td>Serves as the high-level aerospace operational guideline for MAITRI's deterministic emergency outbox and flight surgeon dossiers.</td>
+    </tr>
+    <tr>
+      <td><strong>2020</strong></td>
+      <td>Baevski, A., et al.<br><em>(NeurIPS)</em></td>
+      <td>Wav2Vec 2.0: Self-supervised learning of speech representations directly from raw audio waveforms, capturing rich prosody and phonetics.</td>
+      <td>State-of-the-art representations for vocal emotion classification; robust to linguistic variations.</td>
+      <td>High memory footprint (~360MB fp32); sensitive to low-frequency background hum (ALC257 fan noise) causing classification drift.</td>
+      <td>Serves as the primary acoustic transformer in MAITRI's dual-model SER, mitigated by DAP pre-filtering and MFCC-MLP ensemble.</td>
+    </tr>
+    <tr>
+      <td><strong>2022</strong></td>
+      <td>Chlan, L. L., et al.<br><em>(Intensive Care Nurs)</em></td>
+      <td>Non-pharmacological music and auditory pacing interventions for anxiety and autonomic nervous system regulation in critical care patients.</td>
+      <td>Validated structured acoustic pacing (tempo &lt;70 BPM) significantly decreases cortisol and heart rate without drug side-effects.</td>
+      <td>Manual therapist administration; lacked real-time physiological feedback loops to modulate sound dynamically.</td>
+      <td>Directly justifies MAITRI's Phase 2 Adaptive Audio countermeasure, grounding audio selection in physiological stabilization rather than pseudoscience.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 class="tvs-sub-section">Observation and Research Gap</h2>
+<p>
+Most existing aerospace monitoring systems operate strictly as passive diagnostic tools that log stress for post-hoc analysis by terrestrial medical officers. Under deep-space communication delays (&ge;22 min), passive monitoring is fundamentally inadequate; the system must execute an immediate, closed-loop behavioral countermeasure. Furthermore, cloud-dependent machine learning is impossible without internet connectivity, while unconstrained generative LLMs introduce dangerous hallucination risks. Therefore, a 100% offline, low-latency multimodal monitoring pipeline coupled with a deterministic, safety-gated closed-loop support engine is required for deep-space missions.
+</p>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 3: PROBLEM STATEMENT -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">3 Problem Statement</h1>
+<ul>
+  <li>
+    <strong>IDEAL:</strong> Astronaut crews on deep-space exploration missions should possess continuous, objective, and non-invasive psycho-physiological monitoring capable of detecting mental fatigue and distress at the earliest onset, supported by real-time private psychiatric counseling from Earth and automated onboard behavioral countermeasures to sustain peak cognitive and operational performance.
+  </li>
+  <li>
+    <strong>REALITY:</strong> In long-duration deep-space transit (such as missions to Mars or lunar outposts), electromagnetic wave propagation introduces light-speed communication delays of 3 to 22 minutes each way (up to 44 minutes roundtrip), rendering real-time tele-counseling physically impossible. Deep-space telemetry links suffer from strict bandwidth limitations, antenna shadowing, and multi-week solar conjunction blackouts. Simultaneously, astronauts operate inside noisy, confined habitats, enduring microgravity fluid shifts and circadian disruption, while routinely suppressing subjective symptoms of distress due to operational spaceflight culture. Furthermore, spacecraft avionics possess strictly limited edge computational resources that cannot host massive, unoptimized cloud AI models.
+  </li>
+  <li>
+    <strong>CONSEQUENCES:</strong>
+    <ul>
+      <li>Unnoticed accumulation of acute stress and cognitive fatigue leading to attentional tunneling, degraded psychomotor vigilance, and catastrophic operational errors during safety-critical maneuvers (e.g., orbital docking, EVA operations).</li>
+      <li>Escalation of unmitigated anxiety into acute panic attacks or dissociative stupors without immediate therapeutic support.</li>
+      <li>Development of chronic psychosomatic exhaustion, sleep pathology, and interpersonal friction among crew members, threatening mission cohesion.</li>
+      <li>Alarm fatigue and system deactivation caused by naive single-sensor monitors that trigger false alarms during routine activities (e.g., misinterpreting exercise tachycardia as panic, or reading posture as catatonia).</li>
+      <li>Complete operational isolation of the crew during solar conjunction communication blackouts without autonomous behavioral support.</li>
+    </ul>
+  </li>
+  <li>
+    <strong>PROPOSAL:</strong> To develop <strong>MAITRI (Multimodal AI-based Astronaut Telemetry & Real-time Intelligence)</strong>, an autonomous, 100% offline, edge-native software architecture that synthesizes live facial affect, eye fatigue, acoustic speech prosody, and physiological vitals into an anti-flicker Stress Index (0–100%) via quality-gated multimodal fusion, and drives a deterministic, safety-gated closed-loop affective support engine featuring structured CBT countermeasures, a local quantized LLM, tempo-regulated adaptive audio, and Delay-Tolerant Networking (DTN) ground escalation.
+  </li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 4: OBJECTIVES -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">4 Objectives</h1>
+
+<h2 class="tvs-sub-section">Phase 1 Implemented Objectives (Monitoring & Telemetry)</h2>
+<ul>
+  <li>To develop a decoupled, sub-10ms facial affect classification pipeline utilizing an optimized EfficientNet-B2 ONNX model (<code>enet_b2_7.onnx</code>) running on ONNX Runtime with 6 intra-op threads to classify 7 canonical emotions (<code>angry</code>, <code>disgust</code>, <code>fear</code>, <code>happy</code>, <code>neutral</code>, <code>sad</code>, <code>surprise</code>) at 30 FPS.</li>
+  <li>To implement 478-point 3D facial landmark tracking (MediaPipe Tasks API) to compute Eye Aspect Ratio (EAR), track rolling 60-second blink rates via rising-edge hysteresis, and compute clinical PERCLOS fatigue states with adaptive reading-stupor hysteresis (lowering threshold to 5 blinks/min).</li>
+  <li>To engineer a Digital Audio Processing (DAP) pipeline featuring a 75 Hz FFT infrasonic high-pass filter to eliminate spacecraft cooling fan rumble (ALC257 noise), a heuristic laughter/crying reflex bypass ($R_{\text{env}} \sim 0.90$), and an SNR-weighted dual-model Speech Emotion Recognition (SER) ensemble (Wav2Vec2 ONNX + synthetically trained MFCC-MLP ONNX).</li>
+  <li>To formulate a piecewise continuous mathematical model converting Heart Rate (50–160 BPM), Skin Temperature (35–40°C), and Blood Oxygen Saturation (SpO2: 85–100%) into a normalized Physiological Strain Index (0.0–1.0) with non-linear penalties for hypoxia and extreme tachycardia.</li>
+  <li>To design a dynamic, Quality-Gated Exponential Moving Average (EMA, &alpha;=0.15) Multimodal Fusion Engine that dynamically reweights inputs during camera occlusion or acoustic silence, incorporating clinical cross-validation rules to prevent false panic alarms during astronaut exercise.</li>
+  <li>To construct a zero-lag WebRTC streaming pipeline operating at 30 FPS with thread-safe shared state synchronization (<code>live_state.py</code>) and a fixed-scale 480p Heads-Up Display (HUD) video overlay.</li>
+  <li>To integrate a Multi-Factor Inactivity Watchdog (frame-to-frame velocity tracking with 8-pixel shift threshold), an embedded SQLite mission database (<code>maitri_logs.db</code>), an automated Markdown Flight Surgeon Dossier generator, and a Delay-Tolerant Networking (DTN) simulator modeling deep-space propagation delays.</li>
+</ul>
+
+<h2 class="tvs-sub-section">Phase 2 Proposed Objectives (Closed-Loop Affective Support)</h2>
+<ul>
+  <li>To construct a decoupled, thread-safe State Gateway providing a 1 Hz read-only structured JSON snapshot interface between Phase 1 and Phase 2 without consuming raw video frames or degrading monitoring throughput.</li>
+  <li>To develop a temporal persistence and trend slope evaluation algorithm that verifies sustained affective strain (&Delta;t<sub>persist</sub> &ge; 12.0s) and task context, eliminating transient emotional noise.</li>
+  <li>To implement a deterministic Support Policy Engine governed by a 6-State Finite State Machine (<code>STABLE</code>, <code>MILD_CONCERN</code>, <code>SUPPORT</code>, <code>DE_ESCALATION</code>, <code>RECOVERY</code>, <code>REASSESS</code>) augmented with dwell-time hysteresis (15s) and refractory cooldown timers (180s) to eliminate intervention flapping.</li>
+  <li>To compile an offline, structured psychological knowledge base containing validated Cognitive Behavioral Therapy (CBT) protocols, Box Breathing (4-4-4-4), 4-7-8 Parasympathetic regulation, 5-4-3-2-1 Sensory Grounding, and mission contingency checklists.</li>
+  <li>To deploy and benchmark a quantized 4-bit open-weights conversational LLM (Llama-3-8B-Instruct Q4, Mistral-7B Q4, Phi-3-mini Q4) dedicated strictly to natural-language dialogue, strictly prohibited from altering clinical or escalation decisions.</li>
+  <li>To integrate an offline speech interface combining <code>faster-whisper</code> (with Silero VAD) for low-latency speech-to-text with Piper neural TTS for local auditory guidance.</li>
+  <li>To engineer a psychoacoustic Adaptive Audio Engine dynamically selecting tempo-regulated instrumental tracks (60–70 BPM) and biophilic soundscapes to downregulate sympathetic arousal, automatically muted during critical operations.</li>
+  <li>To establish a closed-loop feedback engine computing objective affective differentials (&Delta;Stress = Stress<sub>post</sub> - Stress<sub>pre</sub>) and integrating discrete astronaut self-reports (<code>Better</code>, <code>Same</code>, <code>Worse</code>) to iteratively adapt support policies.</li>
+  <li>To enforce dual deterministic safety gates (Pre-LLM Risk Filter and Post-LLM Output Validator) that intercept clinical emergencies and divert critical events directly to cabin alarms and the DTN outbox.</li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 5: SCOPE -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">5 Scope</h1>
+
+<h2 class="tvs-sub-section">Included:</h2>
+<ul>
+  <li>Multimodal non-invasive monitoring (2D video, microphone audio, physiological telemetry).</li>
+  <li>Sub-10ms facial affect classification (EfficientNet-B2 ONNX) and eye fatigue tracking (MediaPipe 478-pt EAR/PERCLOS).</li>
+  <li>Dual-model speech emotion recognition (Wav2Vec2 + MFCC-MLP) with 75 Hz infrasonic high-pass filtering and heuristic reflex overrides.</li>
+  <li>Physiological vitals strain modeling (HR, Skin Temp, SpO2 piecewise linear scaling).</li>
+  <li>Quality-aware EMA multimodal fusion (&alpha;=0.15) with context-aware exercise cross-validation.</li>
+  <li>Multi-factor inactivity watchdog tracking frame-to-frame velocity and blinks.</li>
+  <li>Delay-Tolerant Networking (DTN) ground outbox simulation and automated Markdown Flight Surgeon Dossier generation.</li>
+  <li>Decoupled 1 Hz State Gateway providing structured JSON snapshots to Phase 2.</li>
+  <li>Deterministic 6-state FSM support policy with dwell-time hysteresis and refractory cooldown timers.</li>
+  <li>Local offline psychological knowledge base (Box Breathing, 4-7-8 regulation, 5-4-3-2-1 Grounding).</li>
+  <li>Quantized local conversational LLM bounded by dual deterministic safety gates.</li>
+  <li>Offline speech I/O via <code>faster-whisper</code> and Piper neural TTS.</li>
+  <li>Psychoacoustic adaptive audio pacing (60–70 BPM) and biophilic soundscapes.</li>
+  <li>Closed-loop feedback delta engine evaluating &Delta;Stress and astronaut self-assessments.</li>
+  <li>100% offline, zero-cloud execution with local SQLite telemetry logging (<code>maitri_logs.db</code>).</li>
+</ul>
+
+<h2 class="tvs-sub-section">Excluded / Limitations:</h2>
+<ul>
+  <li>Not an autonomous clinical psychiatric authority; does not provide formal medical diagnoses (e.g., DSM-5 depression/PTSD) or pharmacological treatment.</li>
+  <li>Does not replace human flight surgeons or operational psychologists.</li>
+  <li>No unconstrained generative AI medical decision-making; critical alerts strictly follow deterministic FSM rules.</li>
+  <li>No physical deep-space RF hardware (Deep Space Network transponders); DTN delays and packet bundling are software-simulated.</li>
+  <li>No unverified acoustic pseudoscience (strictly rejects 432 Hz / 528 Hz claims; grounded in psychoacoustic tempo pacing).</li>
+  <li>No formal NASA flight qualification or FDA clinical certification claims (targeted as a proof-of-concept capstone at TRL 4–5).</li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 6: PROPOSED WORK -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">6 Proposed Work</h1>
+
+<h2 class="tvs-sub-section">6.1 Methodology (Proposed modules, techniques, algos, flowchart/architecture)</h2>
+
+<h3 class="tvs-sub-sub">System Architecture:</h3>
+<p>
+The MAITRI system follows a decoupled, multi-threaded architecture operating on the paradigm <strong>Sense &rarr; Assess &rarr; Select &rarr; Support &rarr; Reassess &rarr; Adapt</strong>:
+</p>
+<pre>
+====================================================================================================
+                        MAITRI: INTEGRATED DUAL-PHASE SYSTEM ARCHITECTURE
+====================================================================================================
+
+      CABIN SENSORS (100% Offline / Non-Invasive)
+      ┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐
+      │ Live HD Video Stream  │   │ Cabin Audio Stream    │   │ Physiological Vitals  │
+      │ (WebRTC 30 FPS)       │   │ (16 kHz Ring Buffer)  │   │ (HR, Temp, SpO2)      │
+      └───────────┬───────────┘   └───────────┬───────────┘   └───────────┬───────────┘
+                  │                           │                           │
+  ================│===========================│===========================│=========================
+  PHASE 1: MULTIMODAL MONITORING &amp; TELEMETRY FOUNDATION (IMPLEMENTED)     │
+  ================│===========================│===========================│=========================
+                  ▼                           ▼                           ▼
+      ┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐
+      │ DIP Enhancement       │   │ DAP Infrasonic Filter │   │ Piecewise Mathematical│
+      │ CLAHE, Gamma, Unsharp │   │ 75Hz FFT High-Pass    │   │ Physiological Strain  │
+      └───────────┬───────────┘   └───────────┬───────────┘   │ Model (HR/Temp/SpO2)  │
+                  │                           │               └───────────┬───────────┘
+          ┌───────┴───────┐           ┌───────┴───────┐                   │
+          ▼               ▼           ▼               ▼                   │
+      ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐             │
+      │ M1: FER   │ │ M2: Eye   │ │ Reflex    │ │ Dual SER  │             │
+      │ Efficient │ │ MediaPipe │ │ Bypass    │ │ Wav2Vec2  │             │
+      │ Net-B2    │ │ EAR 478pt │ │ Laughter/ │ │ + MFCC    │             │
+      │ ONNX (~6ms│ │ PERCLOS   │ │ Crying    │ │ MLP ONNX  │             │
+      └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘             │
+            │             │             └───────┬─────┘                   │
+            │             │                     │                         │
+            ▼             ▼                     ▼                         ▼
+      ┌───────────────────────────────────────────────────────────────────────┐
+      │ M4: Quality-Gated Multimodal Fusion Engine (EMA alpha=0.15)           │
+      │ Context Cross-Validation: HR High + Calm Affect = Physical Exertion   │
+      └───────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                  ┌───────────────────────┼───────────────────────┐
+                  ▼                       ▼                       ▼
+      ┌───────────────────────┐ ┌───────────────────┐ ┌───────────────────────┐
+      │ Fixed-Scale HUD Video │ │ SQLite Mission DB │ │ M7: Inactivity        │
+      │ Overlay (30 FPS)      │ │ (maitri_logs.db)  │ │ Multi-Factor Watchdog │
+      └───────────────────────┘ └───────────────────┘ └───────────┬───────────┘
+                                                                  │ (Incapacity)
+  ================================================================│=========================
+  STATE GATEWAY (Decoupled, Read-Only Snapshot Interface at 1 Hz) │
+  ================================================================│=========================
+                  │                                               │
+                  ▼                                               │
+      ┌───────────────────────────────────────────────┐           │
+      │ Structured State Snapshot                     │           │
+      │ Stress, Trend, Confidence, Fatigue, Context   │           │
+      └───────────────────────┬───────────────────────┘           │
+                              ▼                                   │
+      ┌───────────────────────────────────────────────┐           │
+      │ Trend, Confidence &amp; Persistence Filter        │           │
+      │ Slope Evaluation, Dwell Time Thresholding     │           │
+      └───────────────────────┬───────────────────────┘           │
+                              │                                   │
+  ============================│===================================│=========================
+  PHASE 2: CLOSED-LOOP AFFECTIVE SUPPORT ENGINE (PROPOSED)        │
+  ============================│===================================│=========================
+                              ▼                                   │
+      ┌───────────────────────────────────────────────┐           │
+      │ Support Policy Engine: 6-State FSM            │           │
+      │ STABLE -&gt; MILD -&gt; SUPPORT -&gt; DE-ESC -&gt; RECOV  │           │
+      │ Governed by Hysteresis &amp; Refractory Cooldown  │           │
+      └───────┬───────────────────────────────┬───────┘           │
+              │                               │                   │
+   [Sub-Critical Concern]             [Severe Crisis]             │
+              ▼                               │                   │
+      ┌───────────────┐                       │                   │
+      │ PRE-LLM GATE  │                       │                   │
+      │ Risk Filter   │                       │                   │
+      └───────┬───────┘                       │                   │
+              │ (Normal Concern)              │                   │
+              ▼                               │                   │
+      ┌───────────────┐   ┌───────────────┐   │                   │
+      │ Local KB      │   │ Adaptive      │   │                   │
+      │ CBT/Grounding │   │ Audio Engine  │   │                   │
+      └───────┬───────┘   │ Tempo Pacing  │   │                   │
+              ▼           └───────┬───────┘   │                   │
+      ┌───────────────┐           │           │                   │
+      │ Local LLM     │           │           │                   │
+      │ Quantized     │           │           │                   │
+      │ Llama-3/Phi-3 │           │           │                   │
+      └───────┬───────┘           │           │                   │
+              ▼                   │           │                   │
+      ┌───────────────┐           │           │                   │
+      │ POST-LLM GATE │           │           │                   │
+      │ Safety Check  │           │           │                   │
+      └───────┬───────┘           │           │                   │
+              │ (Pass)            │           │                   │
+              ▼                   ▼           │                   │
+      ┌───────────────┐   ┌───────────────┐   │                   │
+      │ Offline Speech│   │ Ambient Cabin │   │                   │
+      │ I/O (Whisper/ │   │ Audio Out     │   │                   │
+      │ Piper TTS)    │   │ (Non-Critical)│   │                   │
+      └───────┬───────┘   └───────┬───────┘   │                   │
+              │                   │           │                   │
+              └─────────┬─────────┘           │                   │
+                        ▼                     │                   │
+                 ┌─────────────┐              │                   │
+                 │  ASTRONAUT  │              │                   │
+                 └──────┬──────┘              │                   │
+                        ▼                     │                   │
+                 ┌─────────────┐              │                   │
+                 │ Closed-Loop │              │                   │
+                 │ Feedback    │              │                   │
+                 │ (Delta Eval)│              │                   │
+                 └──────┬──────┘              │                   │
+                        │                     │                   │
+           ┌────────────┴────────────┐        │                   │
+           ▼                         ▼        ▼                   ▼
+    [Improvement]              [Persistent / Critical] ────────────────────────┐
+           │                                                                  ▼
+           ▼                                                  ┌───────────────────────────────┐
+   FSM -&gt; RECOVERY                                            │ CRITICAL EMERGENCY PATH       │
+                                                              │ Deterministic Alarms &amp;        │
+                                                              │ Delay-Tolerant Networking     │
+                                                              │ (DTN Outbox to Earth Ground)  │
+                                                              └───────────────────────────────┘
+====================================================================================================
+</pre>
+
+<h3 class="tvs-sub-sub">Core Modules:</h3>
+<ol>
+  <li><strong>Facial Emotion Recognition (M1) <span class="badge badge-implemented">Implemented</span>:</strong> Upgraded from VGG-Face to EfficientNet-B2 ONNX (<code>enet_b2_7.onnx</code>) with 6 threads, processing frames in ~6.3 ms. Enhanced with LAB-space CLAHE and adaptive gamma in <code>dip_enhancer.py</code>.</li>
+  <li><strong>Eye Tracking &amp; Fatigue (M2) <span class="badge badge-implemented">Implemented</span>:</strong> MediaPipe 478-point 3D FaceLandmarker computing EAR. Implements rising-edge blink debouncing over a 60-second window, PERCLOS fatigue tracking, and reading-stupor hysteresis (5 blinks/min threshold).</li>
+  <li><strong>Acoustic Processing &amp; Dual SER (M_Voice) <span class="badge badge-implemented">Implemented</span>:</strong> 75 Hz FFT high-pass filter in <code>dap_enhancer.py</code> eliminating cooling fan drone (ALC257 noise). Autocorrelation envelope reflex bypass for laughter/sobbing. Dual ensemble of Wav2Vec2 ONNX (86 MB) and synthetic-trained MFCC-MLP ONNX (&lt;5 ms).</li>
+  <li><strong>Physiological Vitals Strain Model (M3) <span class="badge badge-implemented">Implemented</span>:</strong> Piecewise homeostatic normalization of Heart Rate (50–160 BPM), Skin Temperature (35–40°C), and SpO2 (85–100%) with non-linear hypoxia penalties.</li>
+  <li><strong>Quality-Gated Multimodal Fusion Engine (M4) <span class="badge badge-implemented">Implemented</span>:</strong> Dynamic quality gating ($W_i$), Exponential Moving Average temporal smoothing (&alpha;=0.15), and exercise cross-validation (capping stress during workout tachycardia).</li>
+  <li><strong>Inactivity Watchdog Subsystem (M5) <span class="badge badge-implemented">Implemented</span>:</strong> Velocity tracking ($\ge 8$ px shift) and blink intervals detecting 45s immobility, triggering Check-In prompts and Incapacitation alerts.</li>
+  <li><strong>Mission Telemetry DB &amp; Dossier Generator (M6) <span class="badge badge-implemented">Implemented</span>:</strong> Thread-safe SQLite logging (<code>maitri_logs.db</code>) with dynamic schema migration and automated Markdown Flight Surgeon Dossier export.</li>
+  <li><strong>Delay-Tolerant Networking Simulator (M7) <span class="badge badge-implemented">Implemented</span>:</strong> Simulates speed-of-light propagation delays (LEO, Moon, Mars) and queues priority-1 emergencies.</li>
+  <li><strong>State Gateway &amp; Support Policy FSM (M8) <span class="badge badge-proposed">Proposed</span>:</strong> Read-only 1 Hz JSON snapshot extractor; 6-state FSM (<code>STABLE</code> &rarr; <code>MILD</code> &rarr; <code>SUPPORT</code> &rarr; <code>DE-ESC</code> &rarr; <code>RECOV</code> &rarr; <code>REASSESS</code>) governed by dwell-time hysteresis and refractory cooldowns.</li>
+  <li><strong>Safety-Gated Conversational Engine (M9) <span class="badge badge-proposed">Proposed</span>:</strong> Dual deterministic safety gates, local CBT/grounding knowledge base, quantized local LLM (Llama-3-8B / Phi-3), and offline speech I/O (<code>faster-whisper</code> + Piper TTS).</li>
+  <li><strong>Adaptive Audio &amp; Feedback Engine (M10) <span class="badge badge-proposed">Proposed</span>:</strong> Tempo-regulated instrumental audio (60–70 BPM), biophilic soundscapes, breathing pacing, and closed-loop delta computation (&Delta;Stress).</li>
+</ol>
+
+<h3 class="tvs-sub-sub">Techniques and Algorithms:</h3>
+<ul>
+  <li><strong>LAB-Space CLAHE &amp; Adaptive Gamma:</strong> Luminance histogram equalization and power-law gamma transformation correcting cabin lighting in <code>dip_enhancer.py</code>.</li>
+  <li><strong>EfficientNet-B2 ONNX Classification:</strong> Compound-scaled CNN executing in ~6.3 ms for 7-class facial affect classification.</li>
+  <li><strong>Eye Aspect Ratio (EAR) Euclidean Geometry:</strong> Eyelid aperture scalar computed from 6 Euclidean landmark distances per eye across a 478-point mesh.</li>
+  <li><strong>Rising-Edge Blink Debouncing:</strong> State-machine thresholding requiring EAR to dip below 0.25 and rise back above 0.25 to register a blink.</li>
+  <li><strong>Reading-Stupor Hysteresis:</strong> Context-aware lowering of active blink threshold from 10 to 5 blinks/min during manual reading tasks.</li>
+  <li><strong>Infrasonic 75 Hz FFT High-Pass Filter:</strong> Filters low-frequency life-support cooling fan drone (ALC257 fan rumble) in <code>dap_enhancer.py</code>.</li>
+  <li><strong>Laughter / Crying Reflex Bypass:</strong> Envelope autocorrelation periodicity ($R_{\text{env}} \sim 0.90$) forcing heuristic emotion overrides for laughter and sobbing.</li>
+  <li><strong>Dual-Model SER Ensemble:</strong> SNR-weighted combination of contextual Wav2Vec2 ONNX (86 MB) and synthetic-trained MFCC-MLP ONNX (&lt;5 ms).</li>
+  <li><strong>Piecewise Homeostatic Vitals Scaling:</strong> Normalizes HR, Temp, and SpO2 into a standardized physiological strain index (0.0–1.0).</li>
+  <li><strong>Dynamic Quality-Aware Weight Gating:</strong> Re-normalizes modality weights based on real-time signal quality coefficients ($Q_i$).</li>
+  <li><strong>Exponential Moving Average (EMA) Smoothing:</strong> Temporal IIR filter (&alpha;=0.15) dampening high-frequency classification flicker.</li>
+  <li><strong>Physical Exertion Cross-Validation:</strong> Classifies workout tachycardia with calm facial affect as <code>Physical Exertion</code>, capping stress.</li>
+  <li><strong>Multi-Factor Inactivity Watchdog:</strong> Instantaneous bounding box velocity tracking (&ge;8 px shift) and blinks detecting 45s immobility.</li>
+  <li><strong>Delay-Tolerant Networking (DTN) Queueing:</strong> Asynchronous bundle storage simulator modeling speed-of-light propagation delays.</li>
+  <li><strong>Finite State Machine (FSM) Policy Engine:</strong> Deterministic 6-state model with dwell-time hysteresis (15s) and refractory cooldowns (180s).</li>
+  <li><strong>Dual Deterministic Safety Gating:</strong> Pre-LLM risk filter and Post-LLM output validator routing emergencies to DTN outbox.</li>
+  <li><strong>Psychoacoustic Tempo-Regulated Audio:</strong> Dynamic audio pacing (60–70 BPM) and biophilic soundscapes downregulating sympathetic arousal.</li>
+  <li><strong>Closed-Loop Affective Delta Engine:</strong> Mathematical computation of &Delta;Stress paired with discrete astronaut self-reports (<code>Better</code>, <code>Same</code>, <code>Worse</code>).</li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 6.2: REQUIREMENTS -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h2 class="tvs-sub-section">6.2 Software and Hardware requirements and availability</h2>
+
+<h3 class="tvs-sub-sub">Software Requirements:</h3>
+<ul>
+  <li><strong>Operating System:</strong> Linux (Ubuntu 22.04 LTS / Fedora 39) or Windows 11 with WSL2.</li>
+  <li><strong>Programming Language:</strong> Python 3.11.x (pinned in local virtual environments <code>venv</code> and <code>venv311</code>).</li>
+  <li><strong>Inference &amp; Perception:</strong> <code>onnxruntime</code> (&ge;1.16.0), <code>mediapipe</code> (&ge;0.10.9), <code>opencv-python-headless</code> (&ge;4.8.0), <code>numpy</code> (&ge;1.24.0), <code>scipy</code> (&ge;1.11.0).</li>
+  <li><strong>Audio &amp; Speech:</strong> <code>librosa</code> (&ge;0.10.1), <code>sounddevice</code> (&ge;0.4.6), <code>PyAudio</code>, <code>faster-whisper</code> (Phase 2), <code>piper-tts</code> (Phase 2).</li>
+  <li><strong>Application Framework:</strong> <code>streamlit</code> (&ge;1.30.0), <code>streamlit-webrtc</code> (&ge;0.47.0 with <code>aiortc</code>), native Python <code>threading</code> with mutex locks.</li>
+  <li><strong>Database &amp; Telemetry:</strong> <code>sqlite3</code> (embedded database <code>maitri_logs.db</code>).</li>
+</ul>
+
+<h3 class="tvs-sub-sub">Hardware Requirements:</h3>
+<ul>
+  <li><strong>Development &amp; Benchmarking System:</strong> Multi-core x86_64 CPU (Intel Core i7-11800H / AMD Ryzen 7 5800H, 8 Cores, 16 Threads), 16 GB RAM, 512 GB NVMe SSD. Optional dedicated GPU (NVIDIA RTX 3060 / 4060 with 6GB+ VRAM) with pure multi-threaded CPU fallback.</li>
+  <li><strong>Sensory Hardware:</strong> Standard USB UVC HD Webcam (720p/1080p @ 30 FPS), Cardioid USB Microphone (16 kHz / 44.1 kHz), and simulated physiological biosensor stream.</li>
+  <li><strong>Simulated Flight Client:</strong> Standard crew laptop (e.g., ISS Lenovo ThinkPad T-series or HP ZBook).</li>
+</ul>
+
+<h3 class="tvs-sub-sub">Availability:</h3>
+<ul>
+  <li>All required software tools are freely available under permissive open-source licenses (Apache 2.0, MIT, BSD) with zero ongoing cloud costs.</li>
+  <li>Standard hardware components are readily available in consumer and industrial aerospace test environments.</li>
+  <li>100% local, zero-cloud execution ensures long-term operational sustainability across multi-year deep-space missions.</li>
+</ul>
+
+<!-- SECTION 7: EXPECTED OUTCOME -->
+<h1 class="tvs-section">7 Expected Outcome</h1>
+<p>
+After successful implementation, the MAITRI system will provide the following outcomes:
+</p>
+<h2 class="tvs-sub-section">Verified Phase 1 Outcomes:</h2>
+<ul>
+  <li>Continuous zero-lag 30 FPS live video pipeline with sub-10ms decoupled inference (~6.3 ms for FER).</li>
+  <li>Dynamic quality-gated mathematical fusion producing a stable Stress Index (0–100%) with EMA temporal smoothing (&alpha;=0.15).</li>
+  <li>Elimination of false vocal classifications caused by life-support cooling fan drone via 75 Hz infrasonic high-pass filtering and heuristic reflex overrides.</li>
+  <li>Accurate differentiation of physical workout tachycardia from acute panic, and quiet manual reading from catatonia.</li>
+  <li>Operational embedded SQLite logging, multi-factor inactivity watchdog, automated Flight Surgeon Dossiers, and simulated DTN deep-space queuing.</li>
+</ul>
+
+<h2 class="tvs-sub-section">Projected Phase 2 Outcomes:</h2>
+<ul>
+  <li>Completely offline support architecture running asynchronously without degrading the 30 FPS monitoring pipeline.</li>
+  <li>Deterministic 6-state FSM eliminating intervention flapping through 15s dwell-time persistence, 10% hysteresis, and 180s cooldowns.</li>
+  <li>Local quantized LLM providing empathetic conversational dialogue strictly bounded by dual deterministic safety gates.</li>
+  <li>Tempo-regulated instrumental and biophilic acoustic pacing automatically suppressed during critical flight operations.</li>
+  <li>Quantitative post-intervention evaluation (&Delta;Stress) and user feedback driving iterative adaptation or ground escalation.</li>
+</ul>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 8: SCHEDULE -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">8 Schedule</h1>
+<ul>
+  <li>Literature Survey &amp; Problem Definition – Weeks 1–2 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Baseline WebRTC Pipeline &amp; DeepFace Testing – Weeks 2–3 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>SOTA FER Upgrade (EfficientNet-B2 ONNX) &amp; Decoupling – Weeks 3–4 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Eye Dynamics &amp; PERCLOS Fatigue Modeling – Weeks 4–5 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Audio Pipeline &amp; DAP 75 Hz Filter Design – Weeks 5–6 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Dual-Model SER &amp; Vitals Normalization – Weeks 6–7 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Quality-Aware Multimodal Fusion &amp; Exercise Rules – Weeks 7–8 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Aerospace Watchdog, DTN Outbox &amp; Dossier Generator – Weeks 8–9 <span class="badge badge-implemented">COMPLETED</span></li>
+  <li>Phase 2 State Gateway &amp; 6-State FSM Design – Weeks 9–10 <span class="badge badge-proposed">PROPOSED</span></li>
+  <li>Local Knowledge Base &amp; Safety Gate Engineering – Weeks 10–11 <span class="badge badge-proposed">PROPOSED</span></li>
+  <li>Local LLM Benchmarking &amp; Offline Speech I/O – Weeks 11–12 <span class="badge badge-proposed">PROPOSED</span></li>
+  <li>Adaptive Audio &amp; Closed-Loop Feedback Delta Engine – Weeks 12–13 <span class="badge badge-proposed">PROPOSED</span></li>
+  <li>End-to-End System Integration &amp; Stress Testing – Week 13 <span class="badge badge-proposed">PROPOSED</span></li>
+  <li>Documentation, Demonstration &amp; Final Defense – Week 14 <span class="badge badge-proposed">PROPOSED</span></li>
+</ul>
+
+<!-- SECTION 9: CHALLENGES AND RISKS -->
+<h1 class="tvs-section" style="margin-top: 25px;">Expected Challenges, Risks, and Mitigation Strategies</h1>
+<table>
+  <thead>
+    <tr>
+      <th style="width: 7%;">Risk ID</th>
+      <th style="width: 18%;">Category</th>
+      <th style="width: 25%;">Potential Risk / Challenge</th>
+      <th style="width: 10%;">Severity</th>
+      <th>Proposed Mitigation Strategy</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>R1</strong></td>
+      <td>Acoustic Signal Processing</td>
+      <td>Cabin life-support fan noise corrupting speech signals and causing false "sad" classifications.</td>
+      <td>High</td>
+      <td>Apply 75 Hz FFT high-pass filter in <code>dap_enhancer.py</code>; enforce energy-based silence gating to zero out acoustic weights during silence.</td>
+    </tr>
+    <tr>
+      <td><strong>R2</strong></td>
+      <td>Computer Vision &amp; Hardware</td>
+      <td>Fluctuating cabin lighting and rapid head motion causing landmark loss or reticle jitter.</td>
+      <td>Medium</td>
+      <td>Preprocess frames with LAB-space CLAHE and adaptive gamma; lock HUD text to fixed 480p coordinates; switch weight to vitals when face is lost.</td>
+    </tr>
+    <tr>
+      <td><strong>R3</strong></td>
+      <td>Computational Feasibility</td>
+      <td>Concurrency contention between real-time Phase 1 video and Phase 2 local LLM execution.</td>
+      <td>High</td>
+      <td>Decouple Phase 2 via an asynchronous background worker; pass lightweight 1 Hz JSON snapshots instead of video; use 4-bit quantized models.</td>
+    </tr>
+    <tr>
+      <td><strong>R4</strong></td>
+      <td>Operational Human Factors</td>
+      <td>Intervention flapping and alarm fatigue caused by sensor readings oscillating around thresholds.</td>
+      <td>High</td>
+      <td>Enforce a 15-second dwell-time persistence filter, a 10% hysteresis band, and an enforced 180-second post-intervention refractory cooldown.</td>
+    </tr>
+    <tr>
+      <td><strong>R5</strong></td>
+      <td>Clinical Human Factors</td>
+      <td>Misclassifying healthy exercise exertion (tachycardia) as acute psychological panic.</td>
+      <td>Medium</td>
+      <td>Program clinical cross-validation rules: if tachycardia occurs with calm facial affect and active movement, classify as <code>Physical Exertion</code> and cap stress.</td>
+    </tr>
+    <tr>
+      <td><strong>R6</strong></td>
+      <td>AI Safety &amp; Alignment</td>
+      <td>LLM hallucination, unauthorized medical advice, or conversational panic escalation.</td>
+      <td>Critical</td>
+      <td>Restrict LLM strictly to conversational reframing; enforce dual deterministic safety gates; route all critical emergencies directly to DTN outbox.</td>
+    </tr>
+    <tr>
+      <td><strong>R7</strong></td>
+      <td>Communication Network</td>
+      <td>Complete solar conjunction communication blackout preventing ground synchronization.</td>
+      <td>Medium</td>
+      <td>Maintain local SQLite telemetry log (<code>maitri_logs.db</code>); bundle critical medical summaries into DTN outbox for automated dispatch upon link recovery.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- SECTION 10: REFERENCES -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering (Minor in Aerospace Engineering)</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section">References</h1>
+<p style="font-size: 9pt; font-style: italic; margin-bottom: 12px;">(List of books, websites, blogs/articles and papers)</p>
+
+<ol style="font-size: 9.5pt; line-height: 1.45;">
+  <li>Basner, M., Dinges, D. F., Mollicone, D., Ecker, A., Jones, C. W., Hyder, E. C., Di Antonio, A., Savelev, I., Ruf, G. G., &amp; Sutton, J. P. (2014). "Psychological and behavioral changes during confinement in a 520-day simulated Mars mission to determine adaptation to spaceflight." <em>PLoS ONE</em>, 9(3), e93298. https://doi.org/10.1371/journal.pone.0093298</li>
+  <li>Baevski, A., Zhou, Y., Mohamed, A., &amp; Auli, M. (2020). "wav2vec 2.0: A Framework for Self-Supervised Learning of Speech Representations." <em>Advances in Neural Information Processing Systems (NeurIPS 2020)</em>, 33, 12449–12460.</li>
+  <li>Beck, J. S. (2011). <em>Cognitive Behavior Therapy: Basics and Beyond</em> (2nd ed.). The Guilford Press, New York.</li>
+  <li>Cerf, V., Burleigh, S., Hooke, A., Torgerson, L., Durst, R., Scott, K., Fall, K., &amp; Weiss, H. (2007). "Delay-Tolerant Networking Architecture." <em>Internet Engineering Task Force (IETF) RFC 4838</em>. https://doi.org/10.17487/RFC4838</li>
+  <li>Chlan, L. L., Weinert, C. R., Heiderscheit, A., Tracy, M. F., Skaar, D. J., Guttormson, J. L., &amp; Savik, K. (2013). "Effects of patient-directed music therapy on anxiety and sedative exposure in critically ill patients: a randomized clinical trial." <em>JAMA</em>, 309(22), 2335–2344. https://doi.org/10.1001/jama.2013.5670</li>
+  <li>Dinges, D. F., Venkataraman, S., McGlinchey, E. L., &amp; Metaxas, D. N. (2007). "Optical Computer Recognition of Stress, Affect and Fatigue." <em>NASA Technical Reports Server (NTRS)</em>, NASA/CR-2007-214811.</li>
+  <li>Ekman, P., &amp; Friesen, W. V. (1978). <em>Facial Action Coding System: A Technique for the Measurement of Facial Movement</em>. Consulting Psychologists Press, Palo Alto, CA.</li>
+  <li>Kanas, N., Salnitskiy, V., Grund, E. M., Weiss, D. S., Gushin, V., Bostrom, A., Stewart, C., Kozerenko, O., &amp; Marmar, C. R. (2001). "Psychosocial issues in space: results from spaceflights." <em>Journal of Psychosomatic Research</em>, 51(6), 727–734. https://doi.org/10.1016/S0022-3999(01)00244-6</li>
+  <li>Lugaresi, C., Tang, J., Nash, H., McClanahan, C., Uboweja, E., Hays, M., Zhang, F., Chang, C. L., Yong, M. G., Lee, J., Chang, W. T., Hua, W., Georg, M., &amp; Grundmann, M. (2019). "MediaPipe: A Framework for Building Perception Pipelines." <em>arXiv preprint arXiv:1906.08172</em>.</li>
+  <li>NASA Human Research Program. (2021). "Risk of Adverse Cognitive or Behavioral Conditions and Psychiatric Disorders." <em>Human Research Roadmap (HRR)</em>, NASA Johnson Space Center, Houston, TX. Available at: https://humanresearchroadmap.nasa.gov/</li>
+  <li>Picard, R. W. (1997). <em>Affective Computing</em>. MIT Press, Cambridge, MA. https://doi.org/10.7551/mitpress/1140.001.0001</li>
+  <li>Soukupova, T., &amp; Cech, J. (2016). "Real-Time Eye Blink Detection using Facial Landmarks." <em>Proceedings of the 21st Computer Vision Winter Workshop (CVWW 2016)</em>, Rimske Toplice, Slovenia.</li>
+  <li>Tan, M., &amp; Le, Q. V. (2019). "EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks." <em>Proceedings of the 36th International Conference on Machine Learning (ICML 2019)</em>, PMLR 97:6105–6114.</li>
+  <li>Thayer, J. F., &amp; Lane, R. D. (2000). "A model of neurovisceral integration in emotion regulation and dysregulation." <em>Journal of Affective Disorders</em>, 61(3), 201–216. https://doi.org/10.1016/S0165-0327(00)00338-4</li>
+  <li>Toups, P. O., et al. (2018). "Autonomous Medical Decision Support: Evolution of Medical Operations for Deep Space Exploration." <em>NASA Technical Memorandum</em>, NASA/TM-2018-220072, NASA Johnson Space Center.</li>
+</ol>
+
+<h1 class="tvs-section" style="margin-top: 25px;">Details of Team Members</h1>
+<table>
+  <thead>
+    <tr>
+      <th>Roll No</th>
+      <th>Name of the Student</th>
+      <th>Contact No.</th>
+      <th>Email ID</th>
+      <th style="width: 15%;">Signature</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>23031012</strong></td>
+      <td><strong>Mr. Mukul Ramesh Kumbhar</strong></td>
+      <td>+91 98344 01315</td>
+      <td>mukulkumbhar2005@gmail.com</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><strong>23031016</strong></td>
+      <td><strong>Mr. Aditya Ananda Kumbhar</strong></td>
+      <td>+91 87660 46514</td>
+      <td>kumbharaditya777@gmail.com</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><strong>23101058</strong></td>
+      <td><strong>Mr. Aryan Amarsinh Patil</strong></td>
+      <td>+91 91725 34221</td>
+      <td>aryanpatil.iot@gmail.com</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><strong>23041084</strong></td>
+      <td><strong>Mr. Shreedhar Suresh Dalvi</strong></td>
+      <td>+91 94211 88392</td>
+      <td>shreedhardalvi@gmail.com</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><strong>23101007</strong></td>
+      <td><strong>Ms. Pranjal Sampatrao Mane</strong></td>
+      <td>+91 98233 45110</td>
+      <td>pranjalmane.iot@gmail.com</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+
+<p style="margin-top: 15px;">
+  <strong>Date:</strong> 25th September 2026<br>
+  <strong>Place:</strong> ADCET, Ashta (Sangli), Maharashtra, India
+</p>
+
+<div class="sig-block" style="margin-top: 40px;">
+  <div class="sig-item">
+    <div class="sig-line">Dr. SAKTHIPRIYA BALU<br><span style="font-weight: normal; font-size: 9pt;">GUIDE<br>Dept. of Aeronautical Engineering</span></div>
+  </div>
+  <div class="sig-item">
+    <div class="sig-line">Dr. AMOL S. DANGE<br><span style="font-weight: normal; font-size: 9pt;">Capstone Project Coordinator<br>Dept. of Aeronautical Engineering</span></div>
+  </div>
+</div>
+
+<div class="sig-block" style="margin-top: 40px;">
+  <div class="sig-item">
+    <div class="sig-line">Head of Department<br><span style="font-weight: normal; font-size: 9pt;">Dept. of Aeronautical Engineering<br>ADCET, Ashta</span></div>
+  </div>
+  <div class="sig-item">
+    <div class="sig-line">Director<br><span style="font-weight: normal; font-size: 9pt;">ADCET, Ashta<br>(Empowered Autonomous Institute)</span></div>
+  </div>
+</div>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ANNEXURE - I: PROFORMA - I -->
+<div class="tvs-header">
+  <h3>Annasaheb Dange College of Engineering and Technology, Ashta</h3>
+  <h4>(An Autonomous Institute affiliated to Shivaji University, Kolhapur)</h4>
+  <div class="dept-title">Department of Aeronautical Engineering | Capstone Regulations 2025</div>
+  <div class="accreditation">(NAAC A++ Grade Accredited Institute, NBA Accredited Program, ISO 9001: 2015 Certified Institute)</div>
+</div>
+
+<h1 class="tvs-section" style="text-align: center; border-bottom: none;">Annexure - I: ADCET Capstone Project Proposal (Proforma - I)</h1>
+<p style="text-align: center; font-size: 9pt; color: #666; margin-top: -5px;">(Ref: ADCET/Aero/Project/Regulations-2025, Rev-0, Dated 01/01/2025, Page 2)</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 6%;">S.NO.</th>
+      <th style="width: 24%;">PARTICULARS</th>
+      <th>DETAILS</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">1</td>
+      <td><strong>Student Names with URN</strong></td>
+      <td>
+        1. <strong>Mr. Mukul Ramesh Kumbhar</strong> (URN: 23031012)<br>
+        2. <strong>Mr. Aditya Ananda Kumbhar</strong> (URN: 23031016)<br>
+        3. <strong>Mr. Aryan Amarsinh Patil</strong> (URN: 23101058)<br>
+        4. <strong>Mr. Shreedhar Suresh Dalvi</strong> (URN: 23041084)<br>
+        5. <strong>Ms. Pranjal Sampatrao Mane</strong> (URN: 23101007)
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">2</td>
+      <td><strong>Project Title</strong></td>
+      <td><strong>MAITRI: Multimodal AI-based Astronaut Telemetry & Real-time Intelligence</strong><br><em>(Multimodal Astronaut Psychological Well-being and Emotional Support System)</em></td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">3</td>
+      <td><strong>Objective</strong></td>
+      <td>
+        <strong>Phase 1 (Implemented Foundation):</strong> Develop a 100% offline, zero-lag, multimodal monitoring pipeline combining real-time Facial Emotion Recognition (FER), Eye Aspect Ratio (EAR) blink-fatigue tracking, Speech Emotion Recognition (SER), and physiological vitals normalization into a unified Stress Index (0–100%) backed by a mission watchdog and Delay-Tolerant Networking (DTN) simulator.<br>
+        <strong>Phase 2 (Proposed Development):</strong> Formulate and integrate a safety-gated, closed-loop, offline affective support architecture operating on the paradigm <em>Sense &rarr; Assess &rarr; Select &rarr; Support &rarr; Reassess &rarr; Adapt</em>, utilizing a deterministic Finite State Machine (FSM), local conversational LLM, offline speech I/O, scientifically grounded adaptive audio, and objective/subjective feedback adaptation.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">4</td>
+      <td><strong>Problem Statement</strong></td>
+      <td>
+        In Long-Duration Spaceflight (LDSF), extreme confinement, sleep disruption, and light-speed communication delays (3 to 22 minutes roundtrip for Mars) render Earth-based psychiatric tele-support impossible. Subjective self-reporting is vulnerable to operational suppression, while single-modality sensors fail to disambiguate physical exertion from psychological panic. There is an urgent need for an onboard, edge-native, privacy-preserving AI system that autonomously detects mental-physical degradation and administers closed-loop non-pharmacological support without cloud dependence.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">5</td>
+      <td><strong>Scope of the Project</strong></td>
+      <td>
+        <strong>Included:</strong> Non-invasive computer vision (FER, EAR, blink rate), acoustic prosody analysis (dual-model SER), physiological vitals strain modeling (HR, Temp, SpO2), quality-gated multimodal fusion, inactivity/catatonia watchdog, local SQLite telemetry logging, DTN ground outbox simulator, deterministic FSM support policy, local knowledge base, quantized local LLM conversational support, offline STT/TTS, adaptive audio pacing, and closed-loop feedback adaptation.<br>
+        <strong>Excluded / Limitations:</strong> Not an autonomous clinical psychiatric authority; does not provide formal medical diagnoses or pharmacological treatment; does not replace human flight surgeons; evaluated on simulated hardware testbeds rather than certified spaceflight avionics.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">6</td>
+      <td><strong>Expected Outcomes</strong></td>
+      <td>
+        1. Sub-10ms decoupled visual and acoustic inference pipeline executing at 30 FPS locally.<br>
+        2. Dynamic quality-gated stress estimation robust to camera occlusion, ambient fan noise, and exercise.<br>
+        3. Deterministic safety-gated FSM support policy preventing intervention flapping.<br>
+        4. Closed-loop adaptation verifying post-intervention stress reduction via biosignal and user feedback.<br>
+        5. Comprehensive mission dossier generation and delayed telemetry queueing for ground control.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">7</td>
+      <td><strong>Timeline</strong></td>
+      <td>
+        14-week phased execution across Academic Year 2025–2026. Weeks 1–8: Literature survey, Phase 1 multimodal monitoring architecture, optimization, and testing (<span class="badge badge-implemented">COMPLETED</span>). Weeks 9–14: Phase 2 State Gateway, FSM policy engine, local LLM/audio integration, closed-loop feedback, end-to-end testing, and capstone documentation (<span class="badge badge-proposed">CURRENT & PROPOSED</span>).
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">8</td>
+      <td><strong>Methodology</strong></td>
+      <td>
+        <strong>Paradigm:</strong> <em>Sense &rarr; Assess &rarr; Select &rarr; Support &rarr; Reassess &rarr; Adapt</em>.<br>
+        <strong>Visual:</strong> MediaPipe SSD + Digital Image Processing (CLAHE, Gamma) + EfficientNet-B2 ONNX + 478-landmark Eye Aspect Ratio (EAR) with rising-edge blink debouncing.<br>
+        <strong>Acoustic:</strong> Infrasonic 75 Hz high-pass filter + Laughter/Crying reflex bypass + Dual-Model SER (Wav2Vec2 ONNX + MFCC-MLP ONNX).<br>
+        <strong>Physiological:</strong> Piecewise normalization of HR, Temp, and SpO2.<br>
+        <strong>Fusion:</strong> Quality-gated Exponential Moving Average (EMA, &alpha;=0.15) with physical exertion cross-validation.<br>
+        <strong>Support Engine:</strong> Multi-Factor Watchdog + State Gateway Snapshot + 6-State FSM with dwell/cooldown hysteresis + Dual Pre/Post Safety Gates + Local Knowledge Base (CBT/Grounding) + Quantized Local LLM + Offline STT/TTS + Adaptive Audio + Closed-Loop Feedback Delta Engine.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">9</td>
+      <td><strong>Resources Required</strong></td>
+      <td>
+        <strong>Hardware:</strong> Multi-core workstation/laptop (AMD Ryzen / Intel Core i7, 16 GB RAM), USB HD Webcam (1080p@30FPS), Cardioid USB Microphone, Wearable Biosensor simulator.<br>
+        <strong>Software / Libraries:</strong> Python 3.11, ONNX Runtime, MediaPipe Tasks, OpenCV, Streamlit & Streamlit-WebRTC (aiortc), NumPy, SciPy, Librosa, SQLite3, faster-whisper, Piper TTS, quantized LLM execution engine (llama.cpp / Ollama).<br>
+        <strong>Availability:</strong> 100% open-source, locally hosted, zero cloud costs.
+      </td>
+    </tr>
+    <tr>
+      <td style="text-align: center; font-weight: bold;">10</td>
+      <td><strong>Expected Challenges and Risks</strong></td>
+      <td>
+        1. <em>Acoustic Cabin Noise:</em> Life-support fans causing false vocal classifications (Mitigated by 75 Hz infrasonic FFT filter and silence gating).<br>
+        2. <em>Edge Compute Contention:</em> Multi-model concurrency inducing frame drops (Mitigated by ONNX INT8 quantization and asynchronous worker decoupling).<br>
+        3. <em>Intervention Flapping:</em> Rapid oscillation between stress states (Mitigated by FSM dwell-time hysteresis and refractory cooldown timers).<br>
+        4. <em>LLM Hallucination:</em> Inappropriate conversational outputs (Mitigated by dual deterministic safety gates and retrieval-grounded local knowledge bases).
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="tvs-footer">
+  <div>Add: Ashta, Tal: Walwa, Dist: Sangli – 416301, Maharashtra</div>
+  <div>Phone: 8600600700 | Email: info@adcet.in | Website: www.adcet.ac.in</div>
+</div>
+
+</body>
+</html>

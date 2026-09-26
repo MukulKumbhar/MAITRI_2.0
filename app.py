@@ -34,6 +34,23 @@ from modules.vitals_module   import compute_vitals_strain
 # NOTE: face_module and eye_module are imported INSIDE MAITRIVideoProcessor
 # to prevent TF/MediaPipe from loading at Streamlit startup (segfault fix).
 
+# ── Phase 2 ASR tap (optional — zero impact on Phase 1 if absent) ─────────
+try:
+    from modules.asr_tap import asr_buffer as _asr_buffer
+    _ASR_TAP_AVAILABLE = True
+except Exception:
+    _asr_buffer = None
+    _ASR_TAP_AVAILABLE = False
+
+# ── Phase 2 Backend (optional — zero impact on Phase 1 if absent) ─────────
+try:
+    from modules.phase2_core import Phase2Config, Phase2Manager
+    _PHASE2_AVAILABLE = True
+except Exception:
+    Phase2Config = None
+    Phase2Manager = None
+    _PHASE2_AVAILABLE = False
+
 # ── WebRTC ────────────────────────────────────────────────────────────────
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
@@ -223,6 +240,16 @@ if "active_crew" not in st.session_state:
     st.session_state.active_crew = "Cdr. A. Sharma (Pilot / CMO)"
 if "dossier_md" not in st.session_state:
     st.session_state.dossier_md = None
+
+# Phase 2 session state (lazy initialized, zero Phase 1 performance impact)
+if "phase2_mgr" not in st.session_state:
+    st.session_state.phase2_mgr = Phase2Manager() if (_PHASE2_AVAILABLE and Phase2Manager) else None
+if "phase2_cfg" not in st.session_state:
+    st.session_state.phase2_cfg = Phase2Config() if (_PHASE2_AVAILABLE and Phase2Config) else None
+if "phase2_chat_history" not in st.session_state:
+    st.session_state.phase2_chat_history = []
+if "phase2_voice_tap_active" not in st.session_state:
+    st.session_state.phase2_voice_tap_active = True
 
 if "live_state"   not in st.session_state:
     st.session_state.live_state   = LiveState()
@@ -452,6 +479,18 @@ class MAITRIAudioProcessor:
                     arr = r_frame.to_ndarray()
                     arr = arr.flatten()
                     self.voice_detector.push_audio_chunk(arr)
+                    # ── Phase 2 ASR tap (optional, zero-impact when disabled) ──
+                    if _ASR_TAP_AVAILABLE and _asr_buffer is not None and _asr_buffer.enabled:
+                        _asr_buffer.push(arr)
+            except Exception:
+                pass
+        elif _ASR_TAP_AVAILABLE and _asr_buffer is not None and _asr_buffer.enabled:
+            # voice_detector absent: still feed ASR tap if it is active
+            try:
+                resampled_frames = self.resampler.resample(frame)
+                for r_frame in resampled_frames:
+                    arr = r_frame.to_ndarray().flatten()
+                    _asr_buffer.push(arr)
             except Exception:
                 pass
         return frame
@@ -506,15 +545,34 @@ def _draw_aerospace_hud(bgr: np.ndarray, ls: LiveState, display_box: Optional[di
     cv2.rectangle(bgr, (0, 0), (w, top_h), (20, 25, 30), -1)
     cv2.rectangle(bgr, (0, h - bot_h), (w, h), (20, 25, 30), -1)
     
-    # 2. Face Box
-    box = snap.get("face_box")
+    # 2. Face Box (Corner Brackets Reticle)
+    box = display_box if display_box is not None else snap.get("face_box")
     if box:
-        bx, by, bw, bh = box.get("x",0), box.get("y",0), box.get("w",0), box.get("h",0)
+        bx = int(box.get("x", 0))
+        by = int(box.get("y", 0))
+        bw = int(box.get("w", 0))
+        bh = int(box.get("h", 0))
         if bw > 0 and bh > 0:
-            cv2.rectangle(bgr, (bx, by), (bx + bw, by + bh), emo_col, max(1, int(2 * sf)))
-            
-            # Draw Face Label
-            lbl = f"{current_emo.upper()} {snap.get('face_confidence',0)*100:.0f}%"
+            thick = max(1, int(2 * sf))
+            # Corner arm length (proportional to face box, minimum 14px)
+            c_len = max(int(14 * sf), min(bw, bh) // 4)
+
+            # 4 Corner brackets (Open center, no solid square)
+            # Top-Left corner
+            cv2.line(bgr, (bx, by), (bx + c_len, by), emo_col, thick)
+            cv2.line(bgr, (bx, by), (bx, by + c_len), emo_col, thick)
+            # Top-Right corner
+            cv2.line(bgr, (bx + bw, by), (bx + bw - c_len, by), emo_col, thick)
+            cv2.line(bgr, (bx + bw, by), (bx + bw, by + c_len), emo_col, thick)
+            # Bottom-Left corner
+            cv2.line(bgr, (bx, by + bh), (bx + c_len, by + bh), emo_col, thick)
+            cv2.line(bgr, (bx, by + bh), (bx, by + bh - c_len), emo_col, thick)
+            # Bottom-Right corner
+            cv2.line(bgr, (bx + bw, by + bh), (bx + bw - c_len, by + bh), emo_col, thick)
+            cv2.line(bgr, (bx + bw, by + bh), (bx + bw, by + bh - c_len), emo_col, thick)
+
+            # Draw Face Label (kept exactly same color, font, scale, and positioning)
+            lbl = f"{current_emo.upper()} {snap.get('face_confidence', 0)*100:.0f}%"
             lbl_y = max(by - int(8 * sf), top_h + int(16 * sf))
             cv2.putText(bgr, lbl, (bx, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sf, emo_col, max(1, int(2 * sf)), cv2.LINE_AA)
                         
@@ -874,7 +932,12 @@ def _render_live_assessment(
 # ─────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────
-tab_live, tab_logs, tab_demo = st.tabs(["🔴 Live Monitoring", "📊 Mission Logs & Trends", "🎬 Demo & Mission Control"])
+tab_live, tab_logs, tab_demo, tab_support = st.tabs([
+    "🔴 Live Monitoring",
+    "📊 Mission Logs & Trends",
+    "🎬 Demo & Mission Control",
+    "🧠 AI Psychological Support",
+])
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 1 — LIVE MONITORING
@@ -937,26 +1000,10 @@ with tab_live:
         _ACTIVE_EYE_STATE  = st.session_state.eye_state
         _ACTIVE_VOICE_DETECTOR = st.session_state.voice_detector
 
-        if "cam_active" not in st.session_state:
-            st.session_state.cam_active = False
-
-        col_cam1, col_cam2 = st.columns([1, 2])
-        with col_cam1:
-            if st.session_state.cam_active:
-                if st.button("🛑 Stop Stream", use_container_width=True):
-                    st.session_state.cam_active = False
-                    st.rerun()
-            else:
-                if st.button("▶️ Start Stream", type="primary", use_container_width=True):
-                    st.session_state.cam_active = True
-                    st.rerun()
-        
-        with col_cam2:
-            use_audio = st.checkbox("🎙️ Enable Microphone (Disable if you get 'NotReadableError')", value=True)
-
-        st.markdown(
-            "<style>#maitri-live button { display: none !important; }</style>",
-            unsafe_allow_html=True
+        use_webrtc_audio = st.checkbox(
+            "🎙️ Enable Browser Microphone for WebRTC",
+            value=False,
+            help="Keep unchecked to prevent hardware mic conflicts. Enable only if your browser microphone is ready."
         )
 
         # Direct synchronous WebRTC video pipeline (<1ms recv latency, locked 30 FPS, zero queue buffering delay)
@@ -965,15 +1012,14 @@ with tab_live:
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             video_processor_factory=_make_video_processor,
-            audio_processor_factory=_make_audio_processor,
-            desired_playing_state=st.session_state.cam_active,
+            audio_processor_factory=_make_audio_processor if use_webrtc_audio else None,
             media_stream_constraints={
                 "video": {
                     "width": {"ideal": 640, "max": 640},
                     "height": {"ideal": 480, "max": 480},
                     "frameRate": {"ideal": 30, "max": 30},
                 },
-                "audio": use_audio,
+                "audio": use_webrtc_audio,
             },
             async_processing=False,
         )
@@ -1178,3 +1224,171 @@ with tab_demo:
         st.download_button("📥 Download Dossier (.md)", st.session_state.dossier_md, "Medical_Dossier.md", "text/markdown")
         with st.expander("Preview Dossier", expanded=True):
             st.markdown(st.session_state.dossier_md)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# TAB 4 — AI PSYCHOLOGICAL SUPPORT (PHASE 2)
+# ═════════════════════════════════════════════════════════════════════════
+with tab_support:
+    st.subheader("🧠 Autonomous In-Flight Psychological Support")
+    st.caption("Offline Multimodal Conversational Intervention · Phi-3-Mini (3.8B) · Whisper ASR · Piper ONNX TTS")
+
+    if not _PHASE2_AVAILABLE:
+        st.error("Phase 2 backend module (`modules/phase2_core.py`) is unavailable. Please verify dependencies.")
+    else:
+        mgr = st.session_state.phase2_mgr
+        cfg = st.session_state.phase2_cfg
+
+        # ── Model Engine Status & Lazy Loader ────────────────────────────────
+        st.markdown("---")
+        c_status, c_ctrl = st.columns([2, 1])
+        with c_status:
+            if mgr and mgr.is_loaded:
+                st.success("🟢 AI Support Engine Online — Whisper ASR, Phi-3 LLM, & Piper TTS Ready", icon="✅")
+            else:
+                st.info("💤 Models are currently idle to conserve CPU/RAM during telemetry monitoring.", icon="ℹ️")
+
+        with c_ctrl:
+            if mgr and not mgr.is_loaded:
+                if st.button("⚡ Initialize Support Engine", type="primary", use_container_width=True):
+                    with st.spinner("Loading offline neural models (Whisper, Phi-3-Mini, Piper)..."):
+                        mgr.load_models(cfg)
+                    st.rerun()
+            elif mgr and mgr.is_loaded:
+                st.caption("⚡ Offline Neural Engine Loaded")
+
+        # ── Real-Time Affective Context Pill ─────────────────────────────────
+        snap_p2 = st.session_state.live_state.snapshot()
+        latest_f = st.session_state.get("latest_fusion")
+        cur_emo = latest_f.dominant_emotion if latest_f else snap_p2.get("face_emotion", "neutral")
+        cur_stress = latest_f.stress_pct if latest_f else getattr(st.session_state.fusion_state, "last_stress", 0.0)
+
+        st.markdown(
+            f"<div style='background:#131c2e;padding:10px 16px;border-radius:8px;border:1px solid #1f3354;margin:12px 0;font-size:0.9rem;'>"
+            f"🛰️ <b>Telemetry Stream Injected to Clinical AI:</b> &nbsp; "
+            f"Affect: <b style='color:#00e676;'>{str(cur_emo).upper()}</b> &nbsp;|&nbsp; "
+            f"Stress Index: <b style='color:#ffab00;'>{float(cur_stress):.1f}%</b> &nbsp;|&nbsp; "
+            f"Astronaut: <b>{st.session_state.active_crew}</b> &nbsp;|&nbsp; "
+            f"Mission: <b>{st.session_state.active_mission}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("---")
+
+        # ── 1. Voice Interaction (Astronaut Talks) ───────────────────────────
+        st.markdown("### 🎙️ Astronaut Voice Channel (Primary)")
+        st.caption("Speak naturally into your microphone. WebRTC automatically feeds speech into the offline Whisper ASR buffer.")
+
+        col_v1, col_v2 = st.columns([1.2, 1.0])
+        with col_v1:
+            tap_enabled = st.checkbox(
+                "🎙️ Enable Continuous Microphone ASR Tap",
+                value=st.session_state.get("phase2_voice_tap_active", True),
+                help="When active, microphone frames from Tab 1 are routed to the Whisper speech buffer."
+            )
+            st.session_state.phase2_voice_tap_active = tap_enabled
+            if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+                _asr_buffer.set_enabled(tap_enabled)
+                pending_s = _asr_buffer.pending_samples / 16000.0
+                st.markdown(f"**Mic Buffer:** `{pending_s:.1f}s` queued &nbsp; *(Needs ≥ 1.0s to transcribe)*")
+
+        voice_submitted = False
+        with col_v2:
+            is_ready = bool(mgr and mgr.is_loaded)
+            if st.button("🗣️ Transcribe & Submit Astronaut Speech", type="primary", use_container_width=True, disabled=not is_ready):
+                voice_submitted = True
+            if not is_ready:
+                st.caption("⚠️ Click 'Initialize Support Engine' above before speaking.")
+
+        user_query = None
+
+        if voice_submitted and mgr and mgr.is_loaded:
+            if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+                batch = _asr_buffer.get_batch(min_samples=16000)
+                if batch is not None and len(batch) > 0:
+                    with st.spinner("Whisper transcribing speech..."):
+                        transcribed_text = mgr.transcribe(batch)
+                    if transcribed_text.strip():
+                        user_query = transcribed_text.strip()
+                        st.success(f"🗣️ Transcribed Voice: *\"{user_query}\"*")
+                    else:
+                        st.warning("No clear words detected in audio buffer. Please speak into the microphone and try again.")
+                else:
+                    st.warning("Audio buffer has less than 1.0s of sound. Make sure the webcam/mic feed is active in Tab 1!")
+
+        # ── 2. Text Input (Astronaut Types Option) ───────────────────────────
+        typed_msg = st.chat_input("💬 Or type your message to MAITRI if not speaking...")
+        if typed_msg:
+            user_query = typed_msg
+
+        # ── 3. Chat History & Conversation Stream ────────────────────────────
+        st.markdown("### 💬 Clinical Dialogue")
+        if not st.session_state.phase2_chat_history:
+            st.info("No conversation logged yet. Speak into the mic or type a message below to begin.")
+
+        for msg in st.session_state.phase2_chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("audio"):
+                    st.audio(msg["audio"], format="audio/wav")
+
+        # ── 4. Process Incoming Query (LLM Reasoning + Piper TTS) ────────────
+        if user_query and mgr:
+            if not mgr.is_loaded:
+                with st.spinner("Initializing models..."):
+                    mgr.load_models(cfg)
+
+            # Record and display user message
+            st.session_state.phase2_chat_history.append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.markdown(user_query)
+
+            # Generate empathetic response using Phi-3 with live clinical context
+            with st.chat_message("assistant"):
+                with st.spinner("MAITRI clinical reasoning in progress..."):
+                    ai_reply = mgr.generate_response(
+                        user_text=user_query,
+                        emotion=str(cur_emo),
+                        stress_pct=float(cur_stress),
+                    )
+                    if not ai_reply:
+                        ai_reply = "Telemetry acknowledged. I am monitoring your physiological state. Please take a slow, deep breath."
+                    st.markdown(ai_reply)
+
+                # Synthesize calm voice response via Piper TTS
+                with st.spinner("Synthesizing voice response (Piper ONNX)..."):
+                    wav_data = mgr.speak(ai_reply)
+                    if wav_data:
+                        st.audio(wav_data, format="audio/wav", autoplay=True)
+
+            # Save assistant response to state
+            st.session_state.phase2_chat_history.append({
+                "role": "assistant",
+                "content": ai_reply,
+                "audio": wav_data if wav_data else None,
+            })
+            st.rerun()
+
+        # ── 5. Quick Clinical Interventions Presets ──────────────────────────
+        st.markdown("---")
+        st.markdown("###### ⚡ Clinical Guidance Presets")
+        pr_cols = st.columns(3)
+        presets = [
+            "I'm feeling high anxiety during this docking phase.",
+            "Guide me through a 4-7-8 grounding exercise.",
+            "Assess my current fatigue and stress telemetry.",
+        ]
+        for p_idx, (p_col, p_text) in enumerate(zip(pr_cols, presets)):
+            with p_col:
+                if st.button(p_text, key=f"quick_preset_{p_idx}", use_container_width=True, disabled=not (mgr and mgr.is_loaded)):
+                    st.session_state.phase2_chat_history.append({"role": "user", "content": p_text})
+                    with st.spinner("MAITRI clinical reasoning..."):
+                        p_rep = mgr.generate_response(p_text, emotion=str(cur_emo), stress_pct=float(cur_stress))
+                        p_wav = mgr.speak(p_rep)
+                    st.session_state.phase2_chat_history.append({
+                        "role": "assistant",
+                        "content": p_rep,
+                        "audio": p_wav if p_wav else None,
+                    })
+                    st.rerun()
