@@ -51,5 +51,4 @@ models/
 
 # SER training cache and audio synthesis
 .ser_cache/
-
-Report site_packages/
+site_packages/
